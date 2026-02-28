@@ -1,0 +1,14 @@
+# IDE
+.idea/
+
+# Build output
+bsgs_dlp
+*.o
+*.out
+
+# Cached BSGS tables
+bsgs_baby_secp256k1_l1_*.bin
+
+# macOS
+.DS_Store
+
