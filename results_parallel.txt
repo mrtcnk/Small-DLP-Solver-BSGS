@@ -1,0 +1,968 @@
+===============================================
+BSGS Multithread Benchmark
+Trials per config: 5
+Threads tested: 1 2 4 8
+===============================================
+
+Running: bits=40 l1=20 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=20 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.041294 sec
+Solved correctly: 5/5
+Search-only total time: 21.079654 sec
+Average per solve (search-only): 4.215930800 sec (4215.93 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=20 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=20 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.015422 sec
+Solved correctly: 5/5
+Search-only total time: 8.383318 sec
+Average per solve (search-only): 1.676663600 sec (1676.66 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=20 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=20 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013795 sec
+Solved correctly: 5/5
+Search-only total time: 4.003563 sec
+Average per solve (search-only): 0.800712600 sec (800.71 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=20 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=20 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013704 sec
+Solved correctly: 5/5
+Search-only total time: 2.238131 sec
+Average per solve (search-only): 0.447626200 sec (447.63 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=21 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=21 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.065147 sec
+Solved correctly: 5/5
+Search-only total time: 5.121402 sec
+Average per solve (search-only): 1.024280400 sec (1024.28 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=21 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=21 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025716 sec
+Solved correctly: 5/5
+Search-only total time: 3.922397 sec
+Average per solve (search-only): 0.784479400 sec (784.48 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=21 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=21 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025773 sec
+Solved correctly: 5/5
+Search-only total time: 2.246054 sec
+Average per solve (search-only): 0.449210800 sec (449.21 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=21 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=21 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.024922 sec
+Solved correctly: 5/5
+Search-only total time: 1.352954 sec
+Average per solve (search-only): 0.270590800 sec (270.59 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=22 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=22 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.065034 sec
+Solved correctly: 5/5
+Search-only total time: 5.143467 sec
+Average per solve (search-only): 1.028693400 sec (1028.69 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=22 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=22 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.055112 sec
+Solved correctly: 5/5
+Search-only total time: 2.085166 sec
+Average per solve (search-only): 0.417033200 sec (417.03 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=22 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=22 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.055360 sec
+Solved correctly: 5/5
+Search-only total time: 1.263367 sec
+Average per solve (search-only): 0.252673400 sec (252.67 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=22 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=22 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.056912 sec
+Solved correctly: 5/5
+Search-only total time: 0.818456 sec
+Average per solve (search-only): 0.163691200 sec (163.69 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=23 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=23 (baby M=2^l1), l2=17 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.166479 sec
+Solved correctly: 5/5
+Search-only total time: 2.774049 sec
+Average per solve (search-only): 0.554809800 sec (554.81 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=23 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=23 (baby M=2^l1), l2=17 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.106112 sec
+Solved correctly: 5/5
+Search-only total time: 0.610681 sec
+Average per solve (search-only): 0.122136200 sec (122.14 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=23 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=23 (baby M=2^l1), l2=17 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.106845 sec
+Solved correctly: 5/5
+Search-only total time: 0.401666 sec
+Average per solve (search-only): 0.080333200 sec (80.33 ms)
+
+--------------------------------------------------
+Running: bits=40 l1=23 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^40)
+Split: l1=23 (baby M=2^l1), l2=17 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.112843 sec
+Solved correctly: 5/5
+Search-only total time: 0.185981 sec
+Average per solve (search-only): 0.037196200 sec (37.20 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=20 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=20 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.027525 sec
+Solved correctly: 5/5
+Search-only total time: 44.504485 sec
+Average per solve (search-only): 8.900897000 sec (8900.90 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=20 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=20 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012629 sec
+Solved correctly: 5/5
+Search-only total time: 21.958197 sec
+Average per solve (search-only): 4.391639400 sec (4391.64 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=20 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=20 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012929 sec
+Solved correctly: 5/5
+Search-only total time: 9.931291 sec
+Average per solve (search-only): 1.986258200 sec (1986.26 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=20 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=20 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013602 sec
+Solved correctly: 5/5
+Search-only total time: 2.836729 sec
+Average per solve (search-only): 0.567345800 sec (567.35 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=21 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=21 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.053518 sec
+Solved correctly: 5/5
+Search-only total time: 14.401142 sec
+Average per solve (search-only): 2.880228400 sec (2880.23 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=21 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=21 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025363 sec
+Solved correctly: 5/5
+Search-only total time: 7.434398 sec
+Average per solve (search-only): 1.486879600 sec (1486.88 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=21 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=21 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025102 sec
+Solved correctly: 5/5
+Search-only total time: 3.652420 sec
+Average per solve (search-only): 0.730484000 sec (730.48 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=21 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=21 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025105 sec
+Solved correctly: 5/5
+Search-only total time: 2.751403 sec
+Average per solve (search-only): 0.550280600 sec (550.28 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=22 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=22 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.055839 sec
+Solved correctly: 5/5
+Search-only total time: 3.149386 sec
+Average per solve (search-only): 0.629877200 sec (629.88 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=22 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=22 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.054994 sec
+Solved correctly: 5/5
+Search-only total time: 3.829749 sec
+Average per solve (search-only): 0.765949800 sec (765.95 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=22 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=22 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.054267 sec
+Solved correctly: 5/5
+Search-only total time: 2.170036 sec
+Average per solve (search-only): 0.434007200 sec (434.01 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=22 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=22 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.055570 sec
+Solved correctly: 5/5
+Search-only total time: 1.297764 sec
+Average per solve (search-only): 0.259552800 sec (259.55 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=23 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=23 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.115176 sec
+Solved correctly: 5/5
+Search-only total time: 2.679752 sec
+Average per solve (search-only): 0.535950400 sec (535.95 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=23 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=23 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.105251 sec
+Solved correctly: 5/5
+Search-only total time: 2.940573 sec
+Average per solve (search-only): 0.588114600 sec (588.11 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=23 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=23 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.109062 sec
+Solved correctly: 5/5
+Search-only total time: 1.264340 sec
+Average per solve (search-only): 0.252868000 sec (252.87 ms)
+
+--------------------------------------------------
+Running: bits=41 l1=23 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^41)
+Split: l1=23 (baby M=2^l1), l2=18 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.112783 sec
+Solved correctly: 5/5
+Search-only total time: 0.512402 sec
+Average per solve (search-only): 0.102480400 sec (102.48 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=20 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=20 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.017679 sec
+Solved correctly: 5/5
+Search-only total time: 79.593550 sec
+Average per solve (search-only): 15.918710000 sec (15918.71 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=20 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=20 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012653 sec
+Solved correctly: 5/5
+Search-only total time: 25.311271 sec
+Average per solve (search-only): 5.062254200 sec (5062.25 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=20 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=20 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012551 sec
+Solved correctly: 5/5
+Search-only total time: 13.210378 sec
+Average per solve (search-only): 2.642075600 sec (2642.08 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=20 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=20 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012101 sec
+Solved correctly: 5/5
+Search-only total time: 10.315950 sec
+Average per solve (search-only): 2.063190000 sec (2063.19 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=21 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=21 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.045471 sec
+Solved correctly: 5/5
+Search-only total time: 38.337763 sec
+Average per solve (search-only): 7.667552600 sec (7667.55 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=21 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=21 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025641 sec
+Solved correctly: 5/5
+Search-only total time: 21.602649 sec
+Average per solve (search-only): 4.320529800 sec (4320.53 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=21 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=21 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025857 sec
+Solved correctly: 5/5
+Search-only total time: 10.121477 sec
+Average per solve (search-only): 2.024295400 sec (2024.30 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=21 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=21 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025101 sec
+Solved correctly: 5/5
+Search-only total time: 4.128284 sec
+Average per solve (search-only): 0.825656800 sec (825.66 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=22 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=22 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.051679 sec
+Solved correctly: 5/5
+Search-only total time: 14.474545 sec
+Average per solve (search-only): 2.894909000 sec (2894.91 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=22 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=22 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.055849 sec
+Solved correctly: 5/5
+Search-only total time: 4.210226 sec
+Average per solve (search-only): 0.842045200 sec (842.05 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=22 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=22 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.057712 sec
+Solved correctly: 5/5
+Search-only total time: 5.055230 sec
+Average per solve (search-only): 1.011046000 sec (1011.05 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=22 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=22 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.061046 sec
+Solved correctly: 5/5
+Search-only total time: 1.035602 sec
+Average per solve (search-only): 0.207120400 sec (207.12 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=23 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=23 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.121533 sec
+Solved correctly: 5/5
+Search-only total time: 6.498180 sec
+Average per solve (search-only): 1.299636000 sec (1299.64 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=23 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=23 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.106645 sec
+Solved correctly: 5/5
+Search-only total time: 2.161397 sec
+Average per solve (search-only): 0.432279400 sec (432.28 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=23 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=23 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.109724 sec
+Solved correctly: 5/5
+Search-only total time: 1.541551 sec
+Average per solve (search-only): 0.308310200 sec (308.31 ms)
+
+--------------------------------------------------
+Running: bits=42 l1=23 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^42)
+Split: l1=23 (baby M=2^l1), l2=19 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.105814 sec
+Solved correctly: 5/5
+Search-only total time: 1.348716 sec
+Average per solve (search-only): 0.269743200 sec (269.74 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=20 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=20 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.015989 sec
+Solved correctly: 5/5
+Search-only total time: 87.834266 sec
+Average per solve (search-only): 17.566853200 sec (17566.85 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=20 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=20 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013463 sec
+Solved correctly: 5/5
+Search-only total time: 53.302273 sec
+Average per solve (search-only): 10.660454600 sec (10660.45 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=20 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=20 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.014676 sec
+Solved correctly: 5/5
+Search-only total time: 29.636458 sec
+Average per solve (search-only): 5.927291600 sec (5927.29 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=20 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=20 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013196 sec
+Solved correctly: 5/5
+Search-only total time: 28.122941 sec
+Average per solve (search-only): 5.624588200 sec (5624.59 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=21 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=21 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.032411 sec
+Solved correctly: 5/5
+Search-only total time: 57.053780 sec
+Average per solve (search-only): 11.410756000 sec (11410.76 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=21 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=21 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.026733 sec
+Solved correctly: 5/5
+Search-only total time: 27.836063 sec
+Average per solve (search-only): 5.567212600 sec (5567.21 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=21 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=21 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.027030 sec
+Solved correctly: 5/5
+Search-only total time: 19.395583 sec
+Average per solve (search-only): 3.879116600 sec (3879.12 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=21 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=21 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.026659 sec
+Solved correctly: 5/5
+Search-only total time: 10.220610 sec
+Average per solve (search-only): 2.044122000 sec (2044.12 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=22 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=22 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.086186 sec
+Solved correctly: 5/5
+Search-only total time: 38.469063 sec
+Average per solve (search-only): 7.693812600 sec (7693.81 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=22 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=22 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.102239 sec
+Solved correctly: 5/5
+Search-only total time: 20.259942 sec
+Average per solve (search-only): 4.051988400 sec (4051.99 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=22 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=22 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.054469 sec
+Solved correctly: 5/5
+Search-only total time: 7.410024 sec
+Average per solve (search-only): 1.482004800 sec (1482.00 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=22 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=22 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.053451 sec
+Solved correctly: 5/5
+Search-only total time: 3.986679 sec
+Average per solve (search-only): 0.797335800 sec (797.34 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=23 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=23 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.200198 sec
+Solved correctly: 5/5
+Search-only total time: 22.807632 sec
+Average per solve (search-only): 4.561526400 sec (4561.53 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=23 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=23 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.115880 sec
+Solved correctly: 5/5
+Search-only total time: 8.879192 sec
+Average per solve (search-only): 1.775838400 sec (1775.84 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=23 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=23 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.111226 sec
+Solved correctly: 5/5
+Search-only total time: 4.852549 sec
+Average per solve (search-only): 0.970509800 sec (970.51 ms)
+
+--------------------------------------------------
+Running: bits=43 l1=23 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^43)
+Split: l1=23 (baby M=2^l1), l2=20 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.109824 sec
+Solved correctly: 5/5
+Search-only total time: 2.822239 sec
+Average per solve (search-only): 0.564447800 sec (564.45 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=20 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=20 (baby M=2^l1), l2=24 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.017865 sec
+Solved correctly: 5/5
+Search-only total time: 214.009019 sec
+Average per solve (search-only): 42.801803800 sec (42801.80 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=20 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=20 (baby M=2^l1), l2=24 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.013654 sec
+Solved correctly: 5/5
+Search-only total time: 123.970488 sec
+Average per solve (search-only): 24.794097600 sec (24794.10 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=20 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=20 (baby M=2^l1), l2=24 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012628 sec
+Solved correctly: 5/5
+Search-only total time: 65.317273 sec
+Average per solve (search-only): 13.063454600 sec (13063.45 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=20 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=20 (baby M=2^l1), l2=24 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_20.bin (cap=2097152, used=1048575)
+Init (load/build) time: 0.012454 sec
+Solved correctly: 5/5
+Search-only total time: 50.779209 sec
+Average per solve (search-only): 10.155841800 sec (10155.84 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=21 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=21 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.034937 sec
+Solved correctly: 5/5
+Search-only total time: 103.312356 sec
+Average per solve (search-only): 20.662471200 sec (20662.47 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=21 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=21 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.029423 sec
+Solved correctly: 5/5
+Search-only total time: 53.630558 sec
+Average per solve (search-only): 10.726111600 sec (10726.11 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=21 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=21 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025165 sec
+Solved correctly: 5/5
+Search-only total time: 36.238336 sec
+Average per solve (search-only): 7.247667200 sec (7247.67 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=21 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=21 (baby M=2^l1), l2=23 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_21.bin (cap=4194304, used=2097151)
+Init (load/build) time: 0.025574 sec
+Solved correctly: 5/5
+Search-only total time: 23.969484 sec
+Average per solve (search-only): 4.793896800 sec (4793.90 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=22 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=22 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.084178 sec
+Solved correctly: 5/5
+Search-only total time: 75.244581 sec
+Average per solve (search-only): 15.048916200 sec (15048.92 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=22 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=22 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.110768 sec
+Solved correctly: 5/5
+Search-only total time: 52.088216 sec
+Average per solve (search-only): 10.417643200 sec (10417.64 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=22 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=22 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.049383 sec
+Solved correctly: 5/5
+Search-only total time: 22.886433 sec
+Average per solve (search-only): 4.577286600 sec (4577.29 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=22 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=22 (baby M=2^l1), l2=22 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_22.bin (cap=8388608, used=4194303)
+Init (load/build) time: 0.049991 sec
+Solved correctly: 5/5
+Search-only total time: 7.244336 sec
+Average per solve (search-only): 1.448867200 sec (1448.87 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=23 trials=5 threads=1
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=23 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.164747 sec
+Solved correctly: 5/5
+Search-only total time: 46.734130 sec
+Average per solve (search-only): 9.346826000 sec (9346.83 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=23 trials=5 threads=2
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=23 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.114407 sec
+Solved correctly: 5/5
+Search-only total time: 15.732405 sec
+Average per solve (search-only): 3.146481000 sec (3146.48 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=23 trials=5 threads=4
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=23 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.110945 sec
+Solved correctly: 5/5
+Search-only total time: 7.396031 sec
+Average per solve (search-only): 1.479206200 sec (1479.21 ms)
+
+--------------------------------------------------
+Running: bits=44 l1=23 trials=5 threads=8
+=== BSGS small-range DLP benchmark (secp256k1) ===
+Range: m in [0, 2^44)
+Split: l1=23 (baby M=2^l1), l2=21 (giant J=2^l2)
+Trials: 5
+Loaded baby table cache: bsgs_baby_secp256k1_l1_23.bin (cap=16777216, used=8388607)
+Init (load/build) time: 0.111883 sec
+Solved correctly: 5/5
+Search-only total time: 4.860455 sec
+Average per solve (search-only): 0.972091000 sec (972.09 ms)
+
+--------------------------------------------------
+
+Benchmark completed.
