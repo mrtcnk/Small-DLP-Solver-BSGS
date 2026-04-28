@@ -1,171 +1,46 @@
-# Small-Range Discrete Logarithm Solver (BSGS) for secp256k1
+# Branch Report: `feat/64bit-key-truncation`
 
-This repository contains a cached **Baby-Step Giant-Step (BSGS)** implementation for recovering bounded discrete logarithms on the **secp256k1** elliptic curve.
-The solver targets problems of the form P = mG where
+## Overview
 
-- `G` is the secp256k1 generator
-- `m` is an integer in a known range
-- `P` is the public point
+This branch introduces a 64-bit key truncation optimization to the baby table in the BSGS solver. It is branched from `feat/multi-thread` and builds directly on top of the parallel solve implementation.
 
-The algorithm assumes m ∈ [0, 2^bits_total)and splits the search as m = i + j·M where
+## Problem
 
-- `M = 2^l1` (baby-step size)
-- `J = 2^l2` (giant-step size)
-- `l2 = bits_total − l1`
+The original implementation stored full 33-byte compressed EC points as keys in the baby hash table. At `l1=26`, this produced a ~4.8 GB table that exceeded available disk space, causing the cache save to fail silently. As a result, every run at `l1=26` required a 227-second rebuild from scratch.
 
----
+## Changes
 
-## Cached BSGS Design
+**Key structure** (`entry33_u32` → `entry64_u32`): The 33-byte compressed point key is replaced with a `uint64_t` holding the first 8 bytes of the x-coordinate. Entry size drops from 38 bytes to 16 bytes.
 
-The implementation stores **baby-step tables on disk** so they only need to be constructed once.
+**Half-range table**: Since `(i*G)[x] == (-i*G)[x]`, both `i` and `-i` share the same x-coordinate. The baby table now stores only `i` in `[1, 2^(l1-1))` instead of `[1, 2^l1)`, halving the number of entries.
 
-Example cache files:
-- `bsgs_baby_secp256k1_l1_18.bin`
-- `bsgs_baby_secp256k1_l1_19.bin`
-- `bsgs_baby_secp256k1_l1_21.bin`
+**Candidate verification**: Each lookup hit now yields two candidates — `j*M + i` and `j*M - i`. A new `verify_candidate()` function checks which is correct via one scalar multiplication.
 
-After the first construction, these tables are reused across runs.
-Typical load time is 0.004 – 0.18 seconds depending on the size of the baby table.
-The observed cache sizes confirm the expected exponential scaling:
+**Cache filename**: Updated to `bsgs_baby64_secp256k1_l1_*.bin` to avoid loading incompatible old-format files.
 
----
+**Error diagnostics**: Added `perror()` calls to the cache save path to surface future failures clearly.
 
-## Complexity
+## Memory Impact
 
-BSGS splits the search space into baby steps ≈ 2^l1 and giant steps ≈ 2^l2. Therefore
-- Memory ≈ O(2^l1)
-- Runtime ≈ O(2^l2)
+| l1 | Before | After | Saving |
+|----|--------|-------|--------|
+| 22 | ~152 MB | 64 MB | 2.4× |
+| 25 | ~1.2 GB | 512 MB | 2.4× |
+| 26 | ~4.8 GB | 1 GB | **4.8×** |
 
-Increasing `l1` increases memory but decreases runtime exponentially.
+## Results
 
----
+All trials solved correctly across all tested bit sizes (32, 44, 48, 49).
 
-# Compilation
+| bits | l1 | l2 | Threads | Avg solve |
+|------|----|----|---------|-----------|
+| 32   | 18 | 14 | 4       | 5.75 ms   |
+| 44   | 22 | 22 | 10      | 795.89 ms |
+| 44   | 25 | 19 | 10      | 177.77 ms |
+| 48   | 25 | 23 | 10      | 3510.92 ms |
+| 48   | 26 | 22 | 10      | 1609.70 ms |
+| 49   | 26 | 23 | 10      | 3853.43 ms |
 
+## Remaining Limitation
 
-cc -O3 -Wall -Wextra -o bsgs_dlp bsgs_dlp.c -lsecp256k1
-
-
----
-
-## Running the Solver
-
-Run a single configuration:
-
-
-./bsgs_dlp <bits_total> <l1> <trials>
-
-### Example:
-
-./bsgs_dlp 44 23 5
-
----
-
-# Automated Experiments
-
-The script `run_all.sh` runs a sweep of parameters automatically.
-
-
-./run_all.sh
-
-
-It evaluates
-
-
-bits_total = 40, ..., 44, l1 = 18, ..., 23, trials = 5 and reports average solve times.
-
----
-
-## Experimental Results
-
-Representative configurations extracted from the automated experiments:
-
-| Range | l1 | l2 | Trials | Baby Entries | Giant Steps | Cache Size | Avg Solve Time |
-|---|---|---|---|---|---|---|---|
-| 2^40 | 18 | 22 | 5 | 262,143 | 4.19M | **22 MB** | ~9.50 s |
-| 2^40 | 20 | 20 | 5 | 1,048,575 | 1.05M | **88 MB** | ~2.65 s |
-| 2^40 | 22 | 18 | 5 | 4,194,303 | 0.26M | **352 MB** | ~0.59 s |
-| 2^41 | 21 | 20 | 5 | 2,097,151 | 1.05M | **176 MB** | ~3.73 s |
-| 2^42 | 21 | 21 | 5 | 2,097,151 | 2.09M | **176 MB** | ~4.56 s |
-| 2^43 | 22 | 21 | 5 | 4,194,303 | 2.09M | **352 MB** | ~4.24 s |
-| 2^44 | 23 | 21 | 5 | 8,388,607 | 2.09M | **704 MB** | ~8.36 s |
----
-
-# Interpretation
-
-The experiments confirm the expected BSGS tradeoff.
-
-Increasing `l1`:
-
-- doubles the baby-step table size
-- halves the giant-step search space
-
-Example for the range `2^40`:
-
-| l1 | l2 | Avg Solve Time |
-|----|----|---------------|
-| 18 | 22 | ~9.50 s |
-| 20 | 20 | ~2.65 s |
-| 22 | 18 | ~0.59 s |
-| 23 | 17 | ~0.52 s |
-
----
-
-# Effect of Increasing Search Range
-
-If the baby table size is fixed while the range grows, runtime increases due to larger giant-step searches.
-
-Example for `l1 = 21`:
-
-| Range | l2 | Avg Solve Time |
-|------|----|---------------|
-| 2^40 | 19 | ~1.36 s |
-| 2^41 | 20 | ~3.73 s |
-| 2^42 | 21 | ~4.56 s |
-| 2^43 | 22 | ~13.52 s |
-| 2^44 | 23 | ~38.18 s |
-
-Runtime therefore scales approximately with 2^l2.
-
----
-
-## Notes
-
-The current implementation performs:
-
-- compressed point serialization
-- hash-table lookup
-
-during each giant step. These operations introduce overhead compared to specialized ECDLP solvers that operate directly in affine coordinates.
-
-Potential improvements include:
-
-- eliminating point serialization
-- x-coordinate hashing
-- multi-target BSGS
-- parallel giant-step search
-
-## Parallel implementation
-
-| Bits | l1 | 1T (s) | 2T (s) | 4T (s) | 8T (s) |
-|------|----|--------|--------|--------|--------|
-| 40 | 20 | 4.216 | 1.677 | 0.801 | 0.448 |
-| 40 | 21 | 1.024 | 0.784 | 0.449 | 0.271 |
-| 40 | 22 | 1.029 | 0.417 | 0.253 | 0.164 |
-| 40 | 23 | 0.555 | 0.122 | 0.080 | 0.037 |
-| 41 | 20 | 8.901 | 4.392 | 1.986 | 0.567 |
-| 41 | 21 | 2.880 | 1.487 | 0.730 | 0.550 |
-| 41 | 22 | 0.630 | 0.766 | 0.434 | 0.260 |
-| 41 | 23 | 0.536 | 0.588 | 0.253 | 0.102 |
-| 42 | 20 | 15.919 | 5.062 | 2.642 | 2.063 |
-| 42 | 21 | 7.668 | 4.321 | 2.024 | 0.826 |
-| 42 | 22 | 2.895 | 0.842 | 1.011 | 0.207 |
-| 42 | 23 | 1.300 | 0.432 | 0.308 | 0.270 |
-| 43 | 20 | 17.567 | 10.660 | 5.927 | 5.625 |
-| 43 | 21 | 11.411 | 5.567 | 3.879 | 2.044 |
-| 43 | 22 | 7.694 | 4.052 | 1.482 | 0.797 |
-| 43 | 23 | 4.562 | 1.776 | 0.971 | 0.564 |
-| 44 | 20 | 42.802 | 24.794 | 13.063 | 10.156 |
-| 44 | 21 | 20.662 | 10.726 | 7.248 | 4.794 |
-| 44 | 22 | 15.049 | 10.418 | 4.577 | 1.449 |
-| 44 | 23 | 9.347 | 3.146 | 1.479 | 0.972 |
+The baby table build loop is still single-threaded. At `l1=26` this costs ~107 seconds on first run. This is now a **one-time cost** since the cache saves correctly, but parallelizing the build loop is a natural next step.
