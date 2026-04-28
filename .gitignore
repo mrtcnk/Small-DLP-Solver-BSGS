@@ -12,3 +12,12 @@ bsgs_baby_secp256k1_l1_*.bin
 # macOS
 .DS_Store
 
+# Compiled binaries
+bsgs
+bsgs_mt
+bsgs_dlp
+bsgs_multi
+kangaroo
+
+# Baby table cache files
+*.bin
