@@ -16,20 +16,20 @@
  *
  * Build:
  *   cc -O3 -Wall -Wextra -o bsgs bsgs_dlp_benchmark_cached.c \
- *       -I$(brew --prefix libsecp256k1)/include                \
- *       -I./secp256k1_src/src                                  \
- *       -L$(brew --prefix libsecp256k1)/lib                    \
+ *       -I/usr/local/include                                   \
+ *       -I/path/to/secp256k1/src                               \
+ *       -L/usr/local/lib                                       \
  *       -lsecp256k1 -lpthread
  *
- * All functions in the _impl.h files are static, so there are no
- * link-time conflicts with the installed libsecp256k1.
+ * On a ripple/xrpl environment:
+ *   -I/Users/<user>/ripple2/src/secp256k1/src
  */
 #include "util.h"
 #include "field.h"
 #include "field_impl.h"
+#include "int128_impl.h"
 #include "group.h"
 #include "group_impl.h"
-#include "int128_impl.h"
 
 /* POSIX I/O */
 #include <sys/stat.h>
@@ -129,15 +129,13 @@ static int read_all(int fd, void* buf, size_t len) {
  */
 
 /* Load secp256k1_pubkey into affine secp256k1_ge.
- * pubkey->data holds the output of secp256k1_ge_to_bytes (64 bytes x||y). */
+ * Mirrors libsecp256k1's internal pubkey_load() exactly. */
 static void pubkey_to_ge(const secp256k1_pubkey* pk, secp256k1_ge* ge) {
     if (sizeof(secp256k1_ge_storage) == 64) {
-        /* Fast path: direct memcpy into ge_storage then convert */
         secp256k1_ge_storage s;
         memcpy(&s, &pk->data[0], sizeof(s));
         secp256k1_ge_from_storage(ge, &s);
     } else {
-        /* Fallback: parse x and y from big-endian bytes */
         secp256k1_fe x, y;
         secp256k1_fe_set_b32_mod(&x, pk->data);
         secp256k1_fe_set_b32_mod(&y, pk->data + 32);
@@ -201,17 +199,31 @@ static int gej_eq_ge(const secp256k1_gej* a, const secp256k1_ge* b) {
 }
 
 /* ================================================================
- * map: uint64 key -> uint32 value  (64-bit truncated x key)
- * ================================================================ */
+ * map: uint64 key -> uint32 value  (packed 8-byte entry)
+ * ================================================================
+ *
+ * CHANGE from 16-byte entry:
+ *   Previous: key(8) + val(4) + used(1) + pad(3) = 16 bytes
+ *   Now:      key(4) + val(4)                    =  8 bytes
+ *
+ * Design:
+ *   x64  = 64-bit truncated x-coordinate
+ *   key  = upper 32 bits of x64 (stored as discriminator)
+ *   idx  = hash(x64) & mask     (position in table, not stored)
+ *   val  = i value; val==0 means empty (i starts from 1, never 0)
+ *
+ * False positives: two distinct x64 values with the same upper 32 bits
+ * will collide. verify_candidate() already handles this correctly.
+ *
+ * Memory saving: 2× vs previous entry size.
+ */
+typedef struct {
+    uint32_t key;  /* upper 32 bits of x64 */
+    uint32_t val;  /* i value; 0 = empty   */
+} entry_packed;    /* 8 bytes, no padding  */
 
 typedef struct {
-    uint64_t key;
-    uint32_t val;
-    uint8_t  used;
-} entry64_u32;
-
-typedef struct {
-    entry64_u32* tab;
+    entry_packed* tab;
     size_t cap;
     size_t mask;
     size_t size;
@@ -222,7 +234,7 @@ static size_t next_pow2(size_t x) {
 }
 
 static int map_init_cap(map64_u32* m, size_t cap_pow2) {
-    m->tab = (entry64_u32*)calloc(cap_pow2, sizeof(entry64_u32));
+    m->tab = (entry_packed*)calloc(cap_pow2, sizeof(entry_packed));
     if (!m->tab) return 0;
     m->cap = cap_pow2; m->mask = cap_pow2 - 1; m->size = 0;
     return 1;
@@ -240,28 +252,33 @@ static uint64_t mix64(uint64_t x) {
     x ^= x >> 31; return x;
 }
 
-static int map_put(map64_u32* m, uint64_t key, uint32_t val) {
-    size_t idx = (size_t)mix64(key) & m->mask;
+static int map_put(map64_u32* m, uint64_t x64, uint32_t val) {
+    uint32_t stored_key = (uint32_t)(x64 >> 32); /* upper 32 bits */
+    size_t   idx        = (size_t)mix64(x64) & m->mask;
     for (;;) {
-        entry64_u32* e = &m->tab[idx];
-        if (!e->used) { e->key=key; e->val=val; e->used=1; m->size++; return 1; }
-        if (e->key == key) return 1;
+        entry_packed* e = &m->tab[idx];
+        if (e->val == 0) {                        /* empty slot   */
+            e->key = stored_key; e->val = val;
+            m->size++; return 1;
+        }
+        if (e->key == stored_key) return 1;       /* duplicate    */
         idx = (idx + 1) & m->mask;
     }
 }
-static int map_get(const map64_u32* m, uint64_t key, uint32_t* out) {
-    size_t idx = (size_t)mix64(key) & m->mask;
+static int map_get(const map64_u32* m, uint64_t x64, uint32_t* out) {
+    uint32_t stored_key = (uint32_t)(x64 >> 32); /* upper 32 bits */
+    size_t   idx        = (size_t)mix64(x64) & m->mask;
     for (;;) {
-        const entry64_u32* e = &m->tab[idx];
-        if (!e->used) return 0;
-        if (e->key == key) { *out = e->val; return 1; }
+        const entry_packed* e = &m->tab[idx];
+        if (e->val == 0) return 0;                /* empty = miss  */
+        if (e->key == stored_key) { *out = e->val; return 1; }
         idx = (idx + 1) & m->mask;
     }
 }
 
 /* ---------------- cached baby table ---------------- */
 
-#define BABY_MAGIC 0x3634594241475342ULL
+#define BABY_MAGIC 0x44454B434150ULL  /* "PACKED" — new format */
 
 typedef struct {
     uint64_t magic; uint32_t version; uint32_t l1;
@@ -269,16 +286,16 @@ typedef struct {
 } baby_hdr;
 
 static void baby_cache_path(char* out, size_t outlen, int l1) {
-    snprintf(out, outlen, "bsgs_baby64_secp256k1_l1_%d.bin", l1);
+    snprintf(out, outlen, "bsgs_baby_packed_secp256k1_l1_%d.bin", l1);
 }
 
 static int baby_save(const char* path, int l1, const map64_u32* baby) {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { perror("baby_save open"); return 0; }
-    baby_hdr hdr = { BABY_MAGIC, 2, (uint32_t)l1,
+    baby_hdr hdr = { BABY_MAGIC, 3, (uint32_t)l1,
                      (uint64_t)baby->cap, (uint64_t)baby->size };
     int ok = write_all(fd, &hdr, sizeof(hdr));
-    ok    &= write_all(fd, baby->tab, baby->cap * sizeof(entry64_u32));
+    ok    &= write_all(fd, baby->tab, baby->cap * sizeof(entry_packed));
     if (!ok) perror("baby_save write");
     close(fd); return ok;
 }
@@ -288,10 +305,10 @@ static int baby_load(const char* path, int expected_l1, map64_u32* out) {
     if (fd < 0) return 0;
     baby_hdr hdr;
     if (!read_all(fd, &hdr, sizeof(hdr))) { close(fd); return 0; }
-    if (hdr.magic != BABY_MAGIC || hdr.version != 2 || (int)hdr.l1 != expected_l1
+    if (hdr.magic != BABY_MAGIC || hdr.version != 3 || (int)hdr.l1 != expected_l1
         || hdr.cap == 0 || (hdr.cap & (hdr.cap-1)) != 0) { close(fd); return 0; }
     if (!map_init_cap(out, (size_t)hdr.cap)) { close(fd); return 0; }
-    if (!read_all(fd, out->tab, (size_t)hdr.cap * sizeof(entry64_u32))) {
+    if (!read_all(fd, out->tab, (size_t)hdr.cap * sizeof(entry_packed))) {
         map_free(out); close(fd); return 0;
     }
     out->size = (size_t)hdr.used_count;
@@ -627,12 +644,13 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
  * ================================================================ */
 
 static void benchmark_bsgs(int bits_total, int l1, int trials, int threads) {
-    printf("=== BSGS (secp256k1, 64-bit key, Jacobian loop) ===\n");
+    printf("=== BSGS (secp256k1, packed 8-byte entry, Jacobian loop) ===\n");
     printf("Range : m in [0, 2^%d)\n", bits_total);
     printf("Split : l1=%d, l2=%d\n", l1, bits_total - l1);
     printf("Inversions per giant step: 1  (was 2 before Jacobian opt)\n");
-    printf("Entry size: %zu bytes | Trials: %d | Threads: %d\n\n",
-           sizeof(entry64_u32), trials, threads);
+    printf("Entry size: %zu bytes  (was 16 bytes, 2x memory saving)\n", sizeof(entry_packed));
+
+    printf("Trials: %d | Threads: %d\n\n", trials, threads);
 
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
     if (!ctx) { printf("Failed to create context\n"); return; }
@@ -645,7 +663,7 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads) {
     }
     double t1 = now_seconds();
     printf("Table : %.2f MB | Init: %.6f sec\n\n",
-           (double)(solver.baby.cap * sizeof(entry64_u32)) / (1 << 20), t1 - t0);
+           (double)(solver.baby.cap * sizeof(entry_packed)) / (1 << 20), t1 - t0);
 
     uint64_t mask = (bits_total == 64) ? ~0ULL : ((1ULL << bits_total) - 1ULL);
     int ok = 0;
