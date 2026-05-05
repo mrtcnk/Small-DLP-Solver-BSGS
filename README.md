@@ -205,22 +205,22 @@ Results use packed 8-byte entry + Jacobian loop + windowed TreeMon, l1=30, 8 GB 
 #### Window sweep — 52-bit (l1=30, l2=22)
 
 | W | Avg solve | vs FastECDLP (248 ms, T=16) |
-|---|-----------|----------------------------|
+|---|-----------|--------------------------|
 | 1 | ~1400 ms | 5.6× slower |
 | 64 | 345 ms | 1.4× slower |
 | 128 | 283 ms | 1.1× slower |
-| **256** | **212 ms** | **✅ 1.17× faster** |
+| **256** | **212 ms** | **1.17× faster** |
 | 512 | 268 ms | 1.1× faster |
 
 #### Window sweep — 54-bit (l1=30, l2=24)
 
 | W | Avg solve | vs FastECDLP (990 ms, T=16) |
-|---|-----------|----------------------------|
+|---|-----------|--------------------------|
 | 1 | 5291 ms | 5.4× slower |
 | 64 | 1057 ms | 1.1× slower |
 | 128 | 873 ms | 1.1× faster |
 | 256 | 826 ms | 1.2× faster |
-| **512** | **595 ms** | **✅ 1.66× faster** |
+| **512** | **595 ms** | **1.66× faster** |
 | 2048 | 801 ms | 1.2× faster |
 
 ---
