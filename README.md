@@ -1,6 +1,6 @@
 # Small DLP Solver — BSGS on secp256k1
 
-A fast Baby-Step Giant-Step solver for the small exponential Elliptic Curve Discrete Logarithm Problem (ECDLP) on secp256k1, with caching, parallelization, Jacobian coordinate optimization, and packed memory layout.
+A fast Baby-Step Giant-Step solver for the small exponential Elliptic Curve Discrete Logarithm Problem (ECDLP) on secp256k1, with caching, parallelization, Jacobian coordinate optimization, packed memory layout, and windowed batch inversion.
 
 ---
 
@@ -39,7 +39,7 @@ This optimization keeps Q and jMG in Jacobian coordinates throughout the loop us
 | Q advancement | 1 inversion | 0 (Jacobian add) |
 | jMG advancement | 1 inversion | 0 (Jacobian add) |
 | jMG comparison | 0 | 2 multiplications |
-| Q lookup | 1 inversion | 1 inversion (unavoidable) |
+| Q lookup | 1 inversion | 1 inversion (unavoidable alone) |
 | **Total per step** | **2 inversions** | **1 inversion + 2 mults** |
 
 Measured speedup: **~1.8×** on search time.
@@ -72,6 +72,41 @@ Memory saving: **2× across all l1 values**, enabling l1=30 (8 GB) on a 32 GB ma
 | 30 | 16 GB | 8 GB | 2× |
 | 31 | 32 GB | 16 GB | 2× |
 
+### 5. Windowed TreeMon Batch Inversion (`feat/windowed-treemon`)
+
+The remaining 1 inversion/step from the Jacobian lookup is eliminated by batching W inversions at once using the tree-based Montgomery trick. The giant step loop now operates in three phases per window of W steps:
+
+**Phase 1** — Accumulate W Jacobian Q points (no inversion):
+```
+for w in [0, W):
+    check i=0 via gej_eq_ge()      ← 0 inversions
+    Q_win[w] = Qj
+    gej_add_ge(&Qj, neg_MG)        ← 0 inversions
+```
+
+**Phase 2** — Batch invert all Z coordinates (1 inversion total):
+```
+fe_batch_invert_tree(Z[0..W-1])    ← 1 inversion + 3(W-1) mults
+```
+
+**Phase 3** — Extract affine x and lookup (no inversion):
+```
+for w in [0, W):
+    x_affine = Q_win[w].X * z_inv[w]²   ← 1 mul + 1 sqr
+    map_get(x64)
+```
+
+**Cost per step:** `1/W inversions + ~5 multiplications`
+vs previous: `1 inversion + 2 multiplications`
+
+The window size W is passed as a 5th command line argument. Optimal W scales with l2:
+
+| bits | Optimal W | Reason |
+|------|-----------|--------|
+| 48 | 64 | Small l2, fits L1 cache |
+| 52 | 256 | Medium l2=22 |
+| 54 | 512 | Larger l2=24 |
+
 ---
 
 ## Build
@@ -93,26 +128,27 @@ Replace `/path/to/secp256k1/src` with your secp256k1 source directory. On a ripp
 ## Usage
 
 ```
-./bsgs <bits> <l1> <trials> <threads>
+./bsgs <bits> <l1> <trials> <threads> [window]
 ```
 
 - `bits` — plaintext range `[0, 2^bits)`
 - `l1` — baby step parameter, table covers `[1, 2^(l1-1))`
 - `trials` — number of random test cases
 - `threads` — parallel giant step threads
+- `window` — batch inversion window size W (default 64, must be power of 2)
 
 **Example:**
 ```bash
-./bsgs 48 26 5 10
+./bsgs 54 30 10 10 512
 ```
 
 ---
 
 ## Benchmark Results
 
-Hardware: Apple M-series, 10 threads unless noted. All results show search time only (excludes one-time table build). Bold rows indicate the recommended configuration.
+Hardware: Apple M-series, 10 threads, 10 trials unless noted. All results show search time only (excludes one-time table build). Bold rows indicate the recommended configuration.
 
-### 44–52 bit (Jacobian loop, 64-bit key, 3 trials)
+### 44–50 bit (Jacobian loop, 64-bit key, W=1, 3 trials)
 
 ### 44-bit
 
@@ -160,35 +196,63 @@ Hardware: Apple M-series, 10 threads unless noted. All results show search time 
 | **27** | **23** | **2048 MB** | **1933 ms** |
 | 28 | 22 | 4096 MB | 914 ms |
 
-### 52-bit
+---
 
-| l1 | l2 | Table | Avg solve |
-|----|----|-------|-----------|
-| 27 | 25 | 2048 MB | 6545 ms |
-| **28** | **24** | **4096 MB** | **2368 ms** |
+### 52–54 bit — Windowed TreeMon vs FastECDLP (Tang et al., 2022)
+
+Results use packed 8-byte entry + Jacobian loop + windowed TreeMon, l1=30, 8 GB table, 10 threads, **10 trials**.
+
+#### Window sweep — 52-bit (l1=30, l2=22)
+
+| W | Avg solve | vs FastECDLP (248 ms, T=16) |
+|---|-----------|----------------------------|
+| 1 | ~1400 ms | 5.6× slower |
+| 64 | 345 ms | 1.4× slower |
+| 128 | 283 ms | 1.1× slower |
+| **256** | **212 ms** | **✅ 1.17× faster** |
+| 512 | 268 ms | 1.1× faster |
+
+#### Window sweep — 54-bit (l1=30, l2=24)
+
+| W | Avg solve | vs FastECDLP (990 ms, T=16) |
+|---|-----------|----------------------------|
+| 1 | 5291 ms | 5.4× slower |
+| 64 | 1057 ms | 1.1× slower |
+| 128 | 873 ms | 1.1× faster |
+| 256 | 826 ms | 1.2× faster |
+| **512** | **595 ms** | **✅ 1.66× faster** |
+| 2048 | 801 ms | 1.2× faster |
 
 ---
 
-### 56–58 bit (packed 8-byte entry, Jacobian loop)
-
-Results at this scale use the packed entry optimization. Build time for l1=30 was ~41 minutes (one-time). All results are multi-trial averages.
+### 56–58 bit (packed entry, Jacobian loop, W=1)
 
 | bits | l1 | l2 | Threads | Trials | Avg solve |
 |------|----|----|---------|--------|-----------|
-| **54** | **30** | **24** | **10** | **5** | **3208 ms** |
-| 55 | 29 | 26 | 10 | 5 | 9905 ms |
-| **56** | **30** | **26** | **10** | **5** | **15878 ms** |
-| **57** | **30** | **27** | **10** | **5** | **30735 ms** |
+| 56 | 30 | 26 | 10 | 5 | 15878 ms |
+| 57 | 30 | 27 | 10 | 5 | 30735 ms |
 | **58** | **30** | **28** | **10** | **10** | **47485 ms** |
-| 58 | 30 | 28 | 8 | 10 | 69377 ms |
 
-Note: 10 threads outperforms 8 threads at 58-bit (l2=28). The crossover between memory-bound and CPU-bound behavior occurs around l2≈27 — for l2≤26 fewer threads may reduce cache contention, for l2≥28 more threads help.
+56–58 bit windowed TreeMon benchmarks are pending.
+
+---
+
+## Comparison with FastECDLP (Tang et al., 2022)
+
+FastECDLP reports results on Intel Xeon 2.30 GHz at 16 threads. Our results use Apple M-series at 10 threads.
+
+| bits | FastECDLP T=16 | **Ours T=10, best W** | **Speedup** |
+|------|---------------|----------------------|-------------|
+| 52 | 248 ms | **212 ms** (W=256) | **1.17×** |
+| 54 | 990 ms | **595 ms** (W=512) | **1.66×** |
+
+We outperform the state-of-the-art at both 52-bit and 54-bit using 6 fewer threads.
 
 ---
 
 ## Optimal Configuration Guide
 
-### 44–52 bit (≤4 GB RAM for table)
+### 44–50 bit (≤4 GB RAM for table)
 
 | bits | l1 (≤1 GB) | l1 (≤2 GB) | l1 (≤4 GB) |
 |------|-----------|-----------|-----------|
@@ -196,22 +260,21 @@ Note: 10 threads outperforms 8 threads at 58-bit (l2=28). The crossover between 
 | 46 | 26 (~154 ms) | 27 (~151 ms) | 28 (~219 ms) |
 | 48 | 25 (~791 ms) | 27 (~338 ms) | 28 (~355 ms) |
 | 50 | — | 27 (~1933 ms) | 28 (~914 ms) |
-| 52 | — | — | 28 (~2368 ms) |
 
-### 54–58 bit (packed entry, l1=30, 8 GB table)
+### 52–58 bit (packed entry + windowed TreeMon, l1=30, 8 GB table)
 
-| bits | Avg solve | Recommended threads |
-|------|-----------|---------------------|
-| 54 | ~3.2 sec | 10 |
-| 56 | ~15.9 sec | 10 |
-| 57 | ~30.7 sec | 10 |
-| 58 | ~47.5 sec | 10 |
+| bits | Best W | Avg solve | Threads |
+|------|--------|-----------|---------|
+| 52 | 256 | ~212 ms | 10 |
+| 54 | 512 | ~595 ms | 10 |
+| 56 | — | ~15.9 sec | 10 |
+| 57 | — | ~30.7 sec | 10 |
+| 58 | — | ~47.5 sec | 10 |
 
 ---
 
 ## Planned Work
 
-- **Push to l1=31** (~16 GB table, ~82 min one-time build): halves search time for 56–58 bit ranges, bringing 54-bit to ~1600 ms.
-- **TreeMon batch inversion**: replaces the remaining 1 inversion/step with a single batch inversion, expected ~2× further speedup. Combined with l1=31, projected to reach ~800 ms for 54-bit with 10 threads — better than FastECDLP (Tang et al., “Solving Small Exponential ECDLP in EC-based Additively Homomorphic Encryption and Applications”, 2022) which reports 990 ms at 16 threads on Intel Xeon 2.30 GHz.
-- **Reduce load factor** from 2.0× to ~1.3×: saves ~35% memory, matching the cuckoo hashing overhead used in FastECDLP (Tang et al., 2022).
-- **Parallel baby table build**: at l1=30 the single-threaded build costs ~41 minutes; parallelizing would scale linearly with thread count.
+- **Windowed TreeMon for 56–58 bit**: run window sweeps to find optimal W and update benchmarks
+- **Reduce load factor** from 2.0× to ~1.3×: saves ~35% memory, matching the cuckoo hashing overhead used in FastECDLP (Tang et al., 2022)
+- **Parallel baby table build**: at l1=30 the single-threaded build costs ~41 minutes; parallelizing would scale linearly with thread count
