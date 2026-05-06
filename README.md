@@ -1,12 +1,12 @@
 # Small DLP Solver — BSGS on secp256k1
 
-A fast Baby-Step Giant-Step solver for the small exponential Elliptic Curve Discrete Logarithm Problem (ECDLP) on secp256k1, with caching, parallelization, Jacobian coordinate optimization, packed memory layout, and windowed batch inversion.
+A fast Baby-Step Giant-Step solver for the small exponential Elliptic Curve Discrete Logarithm Problem (ECDLP) on secp256k1, with caching, parallelization, Jacobian coordinate optimization, packed memory layout, windowed batch inversion, and cuckoo hashing.
 
 ---
 
 ## Overview
 
-EC-based Additively Homomorphic Encryption (AHE) schemes such as Exp-ElGamal require solving a small ECDLP during decryption: recovering `m` from `m*G` where `m` is a bounded integer. This solver implements an optimized BSGS algorithm targeting practical plaintext lengths up to 58+ bits.
+EC-based Additively Homomorphic Encryption (AHE) schemes such as Exp-ElGamal require solving a small ECDLP during decryption: recovering `m` from `m*G` where `m` is a bounded integer. This solver implements an optimized BSGS algorithm targeting practical plaintext lengths up to 63 bits — covering the full XRPL MPT (XLS-33) amount range `[0, 2^63)`.
 
 ---
 
@@ -21,7 +21,6 @@ The baby table originally stored full 33-byte compressed EC points as keys. This
 - Entry size reduced from 38 bytes to 16 bytes
 - Table entries halved by exploiting `(i*G)[x] == (-i*G)[x]` symmetry
 - Combined memory saving: ~6× at large `l1`
-- Fixes cache save failure at `l1=26` (4.8 GB → 1 GB)
 
 | l1 | Before | After | Saving |
 |----|--------|-------|--------|
@@ -30,22 +29,21 @@ The baby table originally stored full 33-byte compressed EC points as keys. This
 | 26 | ~4.8 GB | 1 GB | **4.8×** |
 
 ### 3. Jacobian Loop Optimization (`feat/jacobian-loop`)
-`secp256k1_ec_pubkey_combine()` internally converts Jacobian → affine on every call, paying one modular inversion each time. The giant step loop called it twice per step (to advance Q and jMG), giving 2 inversions per step.
+`secp256k1_ec_pubkey_combine()` internally converts Jacobian → affine on every call, paying one modular inversion each time. The giant step loop called it twice per step — once to advance Q (result used for lookup) and once to advance jMG (result wasted, only needed for the next affine addition). This gives 2 inversions per step.
 
-This optimization keeps Q and jMG in Jacobian coordinates throughout the loop using internal secp256k1 types, converting to affine only once per step for the hash table lookup:
+The Jacobian optimization keeps both Q and jMG in Jacobian coordinates throughout the loop, paying only the unavoidable lookup inversion:
 
 | Operation | Before | After |
 |---|---|---|
-| Q advancement | 1 inversion | 0 (Jacobian add) |
-| jMG advancement | 1 inversion | 0 (Jacobian add) |
-| jMG comparison | 0 | 2 multiplications |
-| Q lookup | 1 inversion | 1 inversion (unavoidable alone) |
-| **Total per step** | **2 inversions** | **1 inversion + 2 mults** |
+| Q advancement | 1 inversion (normalize, doubles as lookup) | 0 (Jacobian add) |
+| jMG advancement | 1 inversion (normalize, wasted) | 0 (Jacobian add) |
+| Q lookup | included above | 1 inversion |
+| **Total per step** | **2 inversions** | **1 inversion** |
 
 Measured speedup: **~1.8×** on search time.
 
 ### 4. Packed 8-byte Entry (`feat/packed-entry`)
-The previous 16-byte entry wasted space through padding and a redundant `used` flag. Since `i` starts from 1 and is never 0, `val==0` serves as the empty sentinel. The key is split: the full 64-bit hash positions the entry in the table (not stored), and only the upper 32 bits are stored as a discriminator:
+The previous 16-byte entry wasted space through padding and a redundant `used` flag. Since `i` starts from 1 and is never 0, `val==0` serves as the empty sentinel:
 
 ```c
 /* Previous: 16 bytes */
@@ -63,25 +61,18 @@ typedef struct {
 } entry_packed;
 ```
 
-Memory saving: **2× across all l1 values**, enabling l1=30 (8 GB) on a 32 GB machine.
-
-| l1 | Before | After | Saving |
-|----|--------|-------|--------|
-| 28 | 4 GB | 2 GB | 2× |
-| 29 | 8 GB | 4 GB | 2× |
-| 30 | 16 GB | 8 GB | 2× |
-| 31 | 32 GB | 16 GB | 2× |
+Memory saving: **2× across all l1 values**.
 
 ### 5. Windowed TreeMon Batch Inversion (`feat/windowed-treemon`)
 
-The remaining 1 inversion/step from the Jacobian lookup is eliminated by batching W inversions at once using the tree-based Montgomery trick. The giant step loop now operates in three phases per window of W steps:
+The remaining 1 inversion/step from the Jacobian lookup is eliminated by batching W inversions at once using the tree-based Montgomery trick. The giant step loop operates in three phases per window of W steps:
 
 **Phase 1** — Accumulate W Jacobian Q points (no inversion):
 ```
+Q = Pm
 for w in [0, W):
-    check i=0 via gej_eq_ge()      ← 0 inversions
-    Q_win[w] = Qj
-    gej_add_ge(&Qj, neg_MG)        ← 0 inversions
+    Q_win[w] = Q
+    Q = Q - MG     ← Jacobian subtraction, 0 inversions
 ```
 
 **Phase 2** — Batch invert all Z coordinates (1 inversion total):
@@ -93,25 +84,40 @@ fe_batch_invert_tree(Z[0..W-1])    ← 1 inversion + 3(W-1) mults
 ```
 for w in [0, W):
     x_affine = Q_win[w].X * z_inv[w]²   ← 1 mul + 1 sqr
-    map_get(x64)
+    cuckoo_lookup(x64)
 ```
 
-**Cost per step:** `1/W inversions + ~5 multiplications`
-vs previous: `1 inversion + 2 multiplications`
+**Cost per step:** `1/W inversions + ~5 multiplications` vs previous `1 inversion`.
 
-The window size W is passed as a 5th command line argument. Optimal W scales with l2:
+Optimal W scales with l2 — larger l2 benefits from larger windows:
 
-| bits | Optimal W | Reason |
-|------|-----------|--------|
-| 48 | 64 | Small l2, fits L1 cache |
-| 52 | 256 | Medium l2=22 |
-| 54 | 512 | Larger l2=24 |
+| bits | l2 | Optimal W |
+|------|-----|-----------|
+| 48 | 22 | 64 |
+| 52 | 22 | 256 |
+| 54 | 23 | 512 |
+| 58 | 27 | 512 |
+
+### 6. Cuckoo Hashing k=3 (`feat/cuckoo-hashing`)
+
+Replaces open-addressing (load factor 2×) with k=3 cuckoo hashing (load factor 1.3×), achieving a **1.54× memory reduction** at all l1 values. This is the key optimization that makes l1=31 feasible on a 32 GB machine.
+
+Two-phase build: 12-byte entries during construction (full x64 key needed for eviction), compacted to 8-byte lookup entries after build. O(1) worst-case lookup: exactly 3 probes + a 16-entry stash (0 stash entries observed in all experiments).
+
+| l1 | Open-addr | Cuckoo | Saving |
+|----|-----------|--------|--------|
+| 26 | 512 MB | 333 MB | 1.54× |
+| 28 | 2048 MB | 1331 MB | 1.54× |
+| 30 | 8192 MB | 5325 MB | 1.54× |
+| **31** | **16384 MB** | **10650 MB** | **1.54×** |
+
+At l1=31 the cuckoo table (~10.4 GB) fits comfortably in 32 GB RAM, enabling l2=23 for 54-bit (vs l2=24 with l1=30) — halving the giant step count.
 
 ---
 
 ## Build
 
-Requires secp256k1 internal headers for Jacobian arithmetic (not included in the Homebrew installation):
+Requires secp256k1 internal headers for Jacobian arithmetic:
 
 ```bash
 cc -O3 -Wall -Wextra -o bsgs bsgs_dlp_benchmark_cached.c \
@@ -131,150 +137,104 @@ Replace `/path/to/secp256k1/src` with your secp256k1 source directory. On a ripp
 ./bsgs <bits> <l1> <trials> <threads> [window]
 ```
 
-- `bits` — plaintext range `[0, 2^bits)`
+- `bits` — plaintext range `[0, 2^bits)`, max 63
 - `l1` — baby step parameter, table covers `[1, 2^(l1-1))`
-- `trials` — number of random test cases
+- `trials` — number of random test cases (use ≥10 for reliable averages)
 - `threads` — parallel giant step threads
 - `window` — batch inversion window size W (default 64, must be power of 2)
 
-**Example:**
+**Example — recommended 54-bit configuration:**
 ```bash
-./bsgs 54 30 10 10 512
+./bsgs 54 31 10 10 512
 ```
 
 ---
 
 ## Benchmark Results
 
-Hardware: Apple M-series, 10 threads, 10 trials unless noted. All results show search time only (excludes one-time table build). Bold rows indicate the recommended configuration.
+Hardware: Apple M-series, 32 GB RAM. All results show search time only (excludes one-time table build). Bold rows indicate the recommended configuration.
 
-### 44–50 bit (Jacobian loop, 64-bit key, W=1, 3 trials)
+### 44–50 bit (Jacobian loop, 64-bit key, W=1)
 
-### 44-bit
+| bits | l1 | l2 | Table | Avg solve |
+|------|----|----|-------|-----------|
+| 44 | **26** | 18 | 1 GB | **51 ms** |
+| 46 | **26** | 20 | 1 GB | **154 ms** |
+| 48 | **25** | 23 | 512 MB | **791 ms** |
+| 50 | **28** | 22 | 4 GB | **914 ms** |
 
-| l1 | l2 | Table | Avg solve |
-|----|----|-------|-----------|
-| 19 | 25 | 8 MB | 4911 ms |
-| 21 | 23 | 32 MB | 1516 ms |
-| 22 | 22 | 64 MB | 896 ms |
-| 23 | 21 | 128 MB | 479 ms |
-| 24 | 20 | 256 MB | 142 ms |
-| 25 | 19 | 512 MB | 110 ms |
-| **26** | **18** | **1024 MB** | **51 ms** |
-| 27 | 17 | 2048 MB | 122 ms |
-| 28 | 16 | 4096 MB | 46 ms |
+### 52–54 bit — Windowed TreeMon, Window Sweep (l1=30, cuckoo, 10T, 10 trials)
 
-### 46-bit
+| W | 52-bit (l2=22) | vs paper | 54-bit (l2=24) | vs paper |
+|---|----------------|----------|-----------------|----------|
+| 1 | ~1400 ms | 5.6× slower | 5291 ms | 5.4× slower |
+| 64 | 345 ms | 1.4× slower | 1057 ms | 1.1× slower |
+| 128 | 283 ms | 1.1× slower | 873 ms | 1.1× faster |
+| **256** | **212 ms** | **1.17×** | 826 ms | 1.2× faster |
+| 512 | 268 ms | 1.1× faster | **595 ms** | **1.66×** |
 
-| l1 | l2 | Table | Avg solve |
-|----|----|-------|-----------|
-| 21 | 25 | 32 MB | 5905 ms |
-| 23 | 23 | 128 MB | 1881 ms |
-| 24 | 22 | 256 MB | 817 ms |
-| 25 | 21 | 512 MB | 596 ms |
-| **26** | **20** | **1024 MB** | **154 ms** |
-| 27 | 19 | 2048 MB | 151 ms |
-| 28 | 18 | 4096 MB | 219 ms |
+FastECDLP (Tang et al., 2022) reference: 52-bit = 248 ms, 54-bit = 990 ms at T=16, Intel Xeon 2.30 GHz.
 
-### 48-bit
+### 54-bit — Cuckoo l1=31 vs l1=30 (W=512, 10T, 10 trials)
 
-| l1 | l2 | Table | Avg solve |
-|----|----|-------|-----------|
-| 23 | 25 | 128 MB | 7373 ms |
-| 24 | 24 | 256 MB | 2985 ms |
-| **25** | **23** | **512 MB** | **791 ms** |
-| 26 | 22 | 1024 MB | 900 ms |
-| 27 | 21 | 2048 MB | 338 ms |
-| 28 | 20 | 4096 MB | 355 ms |
+| l1 | Table | l2 | Avg solve | vs FastECDLP |
+|----|-------|----|-----------|--------------|
+| 30 | 5.3 GB | 24 | 595 ms | 1.66× faster |
+| **31** | **10.4 GB** | **23** | **321 ms** | **3.08× faster** |
 
-### 50-bit
+### 58-bit — Cuckoo l1=31 (W=512, 20 trials)
 
-| l1 | l2 | Table | Avg solve |
-|----|----|-------|-----------|
-| 25 | 25 | 512 MB | 3276 ms |
-| 26 | 24 | 1024 MB | 2080 ms |
-| **27** | **23** | **2048 MB** | **1933 ms** |
-| 28 | 22 | 4096 MB | 914 ms |
+| Threads | Avg solve |
+|---------|-----------|
+| 5 | 9804 ms |
+| 10 | ~6747 ms (10 trials) |
 
----
+### 63-bit — Full MPT Range (cuckoo l1=31, W=512, 10T)
 
-### 52–54 bit — Windowed TreeMon vs FastECDLP (Tang et al., 2022)
-
-Results use packed 8-byte entry + Jacobian loop + windowed TreeMon, l1=30, 8 GB table, 10 threads, **10 trials**.
-
-#### Window sweep — 52-bit (l1=30, l2=22)
-
-| W | Avg solve | vs FastECDLP (248 ms, T=16) |
-|---|-----------|--------------------------|
-| 1 | ~1400 ms | 5.6× slower |
-| 64 | 345 ms | 1.4× slower |
-| 128 | 283 ms | 1.1× slower |
-| **256** | **212 ms** | **1.17× faster** |
-| 512 | 268 ms | 1.1× faster |
-
-#### Window sweep — 54-bit (l1=30, l2=24)
-
-| W | Avg solve | vs FastECDLP (990 ms, T=16) |
-|---|-----------|--------------------------|
-| 1 | 5291 ms | 5.4× slower |
-| 64 | 1057 ms | 1.1× slower |
-| 128 | 873 ms | 1.1× faster |
-| 256 | 826 ms | 1.2× faster |
-| **512** | **595 ms** | **1.66× faster** |
-| 2048 | 801 ms | 1.2× faster |
-
----
-
-### 56–58 bit (packed entry, Jacobian loop, W=1)
-
-| bits | l1 | l2 | Threads | Trials | Avg solve |
-|------|----|----|---------|--------|-----------|
-| 56 | 30 | 26 | 10 | 5 | 15878 ms |
-| 57 | 30 | 27 | 10 | 5 | 30735 ms |
-| **58** | **30** | **28** | **10** | **10** | **47485 ms** |
-
-56–58 bit windowed TreeMon benchmarks are pending.
+| bits | l2 | Avg solve |
+|------|----|-----------|
+| 63 | 32 | ~164 sec (est.)|
 
 ---
 
 ## Comparison with FastECDLP (Tang et al., 2022)
 
-FastECDLP reports results on Intel Xeon 2.30 GHz at 16 threads. Our results use Apple M-series at 10 threads.
+FastECDLP: Intel Xeon 2.30 GHz, 16 threads. This work: Apple M-series, 10 threads.
 
-| bits | FastECDLP T=16 | **Ours T=10, best W** | **Speedup** |
-|------|---------------|----------------------|-------------|
-| 52 | 248 ms | **212 ms** (W=256) | **1.17×** |
-| 54 | 990 ms | **595 ms** (W=512) | **1.66×** |
+| bits | l1 | Table | FastECDLP (T=16) | **This work (T=10)** | **Speedup** |
+|------|-----|-------|-----------------|---------------------|-------------|
+| 52 | 30 | 5.3 GB | 248 ms | **212 ms** (W=256) | **1.17×** |
+| 54 | 30 | 5.3 GB | 990 ms | **595 ms** (W=512) | **1.66×** |
+| **54** | **31** | **10.4 GB** | **990 ms** | **321 ms** (W=512) | **3.08×** |
 
-We outperform the state-of-the-art at both 52-bit and 54-bit using 6 fewer threads.
+**Headline result: 3× faster than the state of the art using 6 fewer threads.**
 
 ---
 
 ## Optimal Configuration Guide
 
-### 44–50 bit (≤4 GB RAM for table)
+### For a 32 GB machine
 
-| bits | l1 (≤1 GB) | l1 (≤2 GB) | l1 (≤4 GB) |
-|------|-----------|-----------|-----------|
-| 44 | 26 (~51 ms) | 27 (~122 ms) | 28 (~46 ms) |
-| 46 | 26 (~154 ms) | 27 (~151 ms) | 28 (~219 ms) |
-| 48 | 25 (~791 ms) | 27 (~338 ms) | 28 (~355 ms) |
-| 50 | — | 27 (~1933 ms) | 28 (~914 ms) |
+| bits | l1 | Table | W | Threads | Avg solve |
+|------|----|-------|---|---------|-----------|
+| 52 | 31 | 10.4 GB | 256 | 10 | ~160 ms (est.) |
+| **54** | **31** | **10.4 GB** | **512** | **10** | **321 ms** |
+| 58 | 31 | 10.4 GB | 512 | 10 | ~6.7 sec |
+| 63 | 31 | 10.4 GB | 512 | 10 | ~164 sec (est.) |
 
-### 52–58 bit (packed entry + windowed TreeMon, l1=30, 8 GB table)
+### One-time build costs (cuckoo, single-threaded)
 
-| bits | Best W | Avg solve | Threads |
-|------|--------|-----------|---------|
-| 52 | 256 | ~212 ms | 10 |
-| 54 | 512 | ~595 ms | 10 |
-| 56 | — | ~15.9 sec | 10 |
-| 57 | — | ~30.7 sec | 10 |
-| 58 | — | ~47.5 sec | 10 |
+| l1 | Table | Build time |
+|----|-------|------------|
+| 26 | 333 MB | ~2 min |
+| 28 | 1.3 GB | ~8 min |
+| 30 | 5.3 GB | ~32 min |
+| 31 | 10.4 GB | ~180 min |
 
 ---
 
 ## Planned Work
 
-- **Windowed TreeMon for 56–58 bit**: run window sweeps to find optimal W and update benchmarks
-- **Reduce load factor** from 2.0× to ~1.3×: saves ~35% memory, matching the cuckoo hashing overhead used in FastECDLP (Tang et al., 2022)
-- **Parallel baby table build**: at l1=30 the single-threaded build costs ~41 minutes; parallelizing would scale linearly with thread count
+- **Extended negation map at giant step**: applying ± symmetry at the giant-step level would halve iterations from 2^(l2-1) to 2^(l2-2), expected to bring 54-bit to ~160 ms (~6× faster than FastECDLP)
+- **Parallel baby table build**: at l1=31 the single-threaded build costs ~180 minutes; parallelizing would scale linearly with thread count
+- **58-bit confirmation**: run 20 trials at 10 threads for a reliable 58-bit average

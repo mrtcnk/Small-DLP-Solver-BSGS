@@ -21,3 +21,4 @@ kangaroo
 
 # Baby table cache files
 *.bin
+*.log
