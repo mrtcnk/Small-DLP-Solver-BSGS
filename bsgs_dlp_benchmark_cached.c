@@ -38,6 +38,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+#define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 /* ---------------- timing ---------------- */
 
 static double now_seconds(void) {
@@ -786,7 +787,7 @@ static void* bsgs_worker_thread(void* argp) {
     const bsgs_ctx*   b = a->b;
     size_t            W = (size_t)a->window;
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     if (!ctx) return NULL;
 
     secp256k1_gej* Q_win = (secp256k1_gej*)malloc(W * sizeof(secp256k1_gej));
@@ -1003,7 +1004,7 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, int 
     printf("Entry  : %zu bytes lookup | Trials: %d | Threads: %d\n\n",
            sizeof(entry_packed), trials, threads);
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     if (!ctx) { printf("Failed to create context\n"); return; }
 
     bsgs_ctx solver;
