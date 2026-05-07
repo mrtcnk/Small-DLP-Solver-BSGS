@@ -312,21 +312,55 @@ static inline size_t cpos(int sec, uint64_t x64, size_t s) {
 
 /* ---- lookup (O(1), 3 probes + stash) ---- */
 
-static int map_get(const cuckoo_map* m, uint64_t x64, uint32_t* out) {
+/*
+ * map_get_all(): collect ALL candidates matching x64's upper-32-bit key
+ * across all 3 cuckoo sections and the stash.
+ *
+ * Why this is necessary:
+ *   The stored key is only the upper 32 bits of x64.  A different x64'
+ *   with the same upper 32 bits (a "false positive") may occupy one of
+ *   the 3 positions before the real entry.  If map_get() returned on the
+ *   first match, verify_candidate() would reject the false positive and
+ *   the real entry would be silently skipped.
+ *
+ *   False-positive probability per lookup: 1/2^32 ≈ 2.3e-10.
+ *   Expected false positives per solve at 58-bit (~256M steps): ~18%.
+ *   At 63-bit (~8B steps): virtually certain.
+ *
+ *   By collecting all matching candidates (at most 3 + stash), the caller
+ *   can verify each one and correctly handle false positives.
+ *
+ * out[]  : caller-supplied array of at least (3 + CUCKOO_STASH_SZ) uint32_t
+ * returns: number of candidates found (0 = definite miss)
+ */
+static int map_get_all(const cuckoo_map* m, uint64_t x64,
+                       uint32_t* out) {
     uint32_t k = (uint32_t)(x64 >> 32);
     size_t   s = m->section_size;
+    int      n = 0;
 
     const entry_packed* e;
     e = &m->tab[cpos(0, x64, s)];
-    if (e->val && e->key == k) { *out = e->val; return 1; }
+    if (e->val && e->key == k) out[n++] = e->val;
     e = &m->tab[cpos(1, x64, s)];
-    if (e->val && e->key == k) { *out = e->val; return 1; }
+    if (e->val && e->key == k) out[n++] = e->val;
     e = &m->tab[cpos(2, x64, s)];
-    if (e->val && e->key == k) { *out = e->val; return 1; }
+    if (e->val && e->key == k) out[n++] = e->val;
 
     for (int i = 0; i < m->stash_count; i++)
-        if (m->stash_x64[i] == x64) { *out = m->stash_val[i]; return 1; }
-    return 0;
+        if (m->stash_x64[i] == x64) out[n++] = m->stash_val[i];
+
+    return n;
+}
+
+/* Convenience wrapper: returns first verified candidate via ±i check.
+ * Use map_get_all() directly in hot loops for efficiency. */
+static int map_get(const cuckoo_map* m, uint64_t x64, uint32_t* out) {
+    uint32_t cands[3 + CUCKOO_STASH_SZ];
+    int nc = map_get_all(m, x64, cands);
+    if (!nc) return 0;
+    *out = cands[0];   /* caller must verify all candidates if nc > 1 */
+    return 1;
 }
 
 /* ---- cuckoo insert into BUILD table ---- */
@@ -644,10 +678,13 @@ static int bsgs_solve(const bsgs_ctx* b,
     uint64_t tx64 = 0;
     for (int i = 1; i <= 8; i++) tx64 = (tx64 << 8) | t33[i];
 
-    uint32_t i_found;
-    if (map_get(&b->baby, tx64, &i_found))
-        if (verify_candidate(ctx, (uint64_t)i_found, t33)) {
-        *out_m = (uint64_t)i_found; return 1;
+    {
+        uint32_t cands[3 + CUCKOO_STASH_SZ];
+        int nc = map_get_all(&b->baby, tx64, cands);
+        for (int ci = 0; ci < nc; ci++)
+            if (verify_candidate(ctx, (uint64_t)cands[ci], t33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
     }
 
     secp256k1_ge target_ge;
@@ -693,9 +730,11 @@ static int bsgs_solve(const bsgs_ctx* b,
 
         for (size_t w = 0; w < W && !result; w++) {
             uint64_t qx64 = gej_x64_from_zinv(&Q_win[w], &bt2[W + w]);
-            if (map_get(&b->baby, qx64, &i_found)) {
-                uint64_t m1 = j_win[w] * b->M + (uint64_t)i_found;
-                uint64_t m2 = j_win[w] * b->M - (uint64_t)i_found;
+            uint32_t cands[3 + CUCKOO_STASH_SZ];
+            int nc = map_get_all(&b->baby, qx64, cands);
+            for (int ci = 0; ci < nc && !result; ci++) {
+                uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
+                uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
                 if (verify_candidate(ctx, m1, t33)) { *out_m = m1; result = 1; }
                 else if (verify_candidate(ctx, m2, t33)) { *out_m = m2; result = 1; }
             }
@@ -708,9 +747,11 @@ static int bsgs_solve(const bsgs_ctx* b,
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
         uint64_t qx64 = ge_x64(&Q_ge);
-        if (map_get(&b->baby, qx64, &i_found)) {
-            uint64_t m1 = j * b->M + (uint64_t)i_found;
-            uint64_t m2 = j * b->M - (uint64_t)i_found;
+        uint32_t cands[3 + CUCKOO_STASH_SZ];
+        int nc = map_get_all(&b->baby, qx64, cands);
+        for (int ci = 0; ci < nc && !result; ci++) {
+            uint64_t m1 = j * b->M + (uint64_t)cands[ci];
+            uint64_t m2 = j * b->M - (uint64_t)cands[ci];
             if (verify_candidate(ctx, m1, t33)) { *out_m = m1; result = 1; }
             else if (verify_candidate(ctx, m2, t33)) { *out_m = m2; result = 1; }
         }
@@ -812,10 +853,11 @@ static void* bsgs_worker_thread(void* argp) {
                 found_in_window = 1; break;
             }
             uint64_t qx64 = gej_x64_from_zinv(&Q_win[w], &bt2[W + w]);
-            uint32_t i_found;
-            if (map_get(&b->baby, qx64, &i_found)) {
-                uint64_t m1 = j_win[w] * b->M + (uint64_t)i_found;
-                uint64_t m2 = j_win[w] * b->M - (uint64_t)i_found;
+            uint32_t cands[3 + CUCKOO_STASH_SZ];
+            int nc = map_get_all(&b->baby, qx64, cands);
+            for (int ci = 0; ci < nc && !found_in_window; ci++) {
+                uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
+                uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
                 uint64_t m_ok = 0; int got = 0;
                 if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
                 else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
@@ -826,7 +868,7 @@ static void* bsgs_worker_thread(void* argp) {
                         atomic_store_explicit(a->found, 1, memory_order_relaxed);
                     }
                     pthread_mutex_unlock(a->found_mu);
-                    found_in_window = 1; break;
+                    found_in_window = 1;
                 }
             }
         }
@@ -849,10 +891,12 @@ static void* bsgs_worker_thread(void* argp) {
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
         uint64_t qx64 = ge_x64(&Q_ge);
-        uint32_t i_found;
-        if (map_get(&b->baby, qx64, &i_found)) {
-            uint64_t m1 = j * b->M + (uint64_t)i_found;
-            uint64_t m2 = j * b->M - (uint64_t)i_found;
+        uint32_t cands[3 + CUCKOO_STASH_SZ];
+        int nc = map_get_all(&b->baby, qx64, cands);
+        int got_it = 0;
+        for (int ci = 0; ci < nc && !got_it; ci++) {
+            uint64_t m1 = j * b->M + (uint64_t)cands[ci];
+            uint64_t m2 = j * b->M - (uint64_t)cands[ci];
             uint64_t m_ok = 0; int got = 0;
             if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
             else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
@@ -863,9 +907,10 @@ static void* bsgs_worker_thread(void* argp) {
                     atomic_store_explicit(a->found, 1, memory_order_relaxed);
                 }
                 pthread_mutex_unlock(a->found_mu);
-                break;
+                got_it = 1;
             }
         }
+        if (got_it) break;
         secp256k1_gej_add_ge(&Qj,   &Qj,   &b->neg_MG_ge);
         secp256k1_gej_add_ge(&jMGj, &jMGj, &b->MG_ge);
         j++;
@@ -890,10 +935,13 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     /* j=0: direct baby lookup */
     uint64_t tx64 = 0;
     for (int i = 1; i <= 8; i++) tx64 = (tx64 << 8) | t33[i];
-    uint32_t i_found;
-    if (map_get(&b->baby, tx64, &i_found))
-        if (verify_candidate(ctx0, (uint64_t)i_found, t33)) {
-        *out_m = (uint64_t)i_found; return 1;
+    {
+        uint32_t cands[3 + CUCKOO_STASH_SZ];
+        int nc = map_get_all(&b->baby, tx64, cands);
+        for (int ci = 0; ci < nc; ci++)
+            if (verify_candidate(ctx0, (uint64_t)cands[ci], t33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
     }
 
     uint64_t J = b->J;
