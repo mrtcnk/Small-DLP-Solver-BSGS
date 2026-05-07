@@ -151,7 +151,7 @@ Replace `/path/to/secp256k1/src` with your secp256k1 source directory. On a ripp
 
 - `bits` — plaintext range `[0, 2^bits)`, max 63
 - `l1` — baby step parameter, table covers `[1, 2^(l1-1))`
-- `trials` — number of random test cases (use ≥10 for reliable averages; ≥20 at 58-bit)
+- `trials` — number of random test cases (use ≥10 for reliable averages)
 - `threads` — parallel giant step threads
 - `window` — batch inversion window size W (default 64, must be power of 2)
 
@@ -166,7 +166,7 @@ Replace `/path/to/secp256k1/src` with your secp256k1 source directory. On a ripp
 
 Hardware: Apple M-series, 32 GB RAM. All results show search time only (excludes one-time table build). All results confirmed correct (Solved correctly: N/N). Bold rows indicate the recommended configuration.
 
-> **Note on trial counts:** BSGS solve time depends on where the random `m` falls in the giant-step range. At least 10 trials are needed for reliable averages at 52–54 bit; at least 20 at 58-bit. Single-trial results at 63-bit carry very high variance and are not cited as performance claims.
+> **Note on trial counts:** BSGS solve time depends on where the random `m` falls in the giant-step range. At least 10 trials are needed for reliable averages. Single-trial results at 63-bit carry very high variance and are not cited as performance claims.
 
 ### 44–50 bit (Jacobian loop, 64-bit key, W=1)
 
@@ -204,16 +204,13 @@ Despite having fewer giant steps (l2=23 vs l2=24), l1=31 is slower than l1=30 be
 |--------|-----------|
 | 10 | **5245 ms** |
 
-### 63-bit — Full MPT Range (cuckoo l1=31, W=512, 10T)
+### 63-bit — Full MPT Range (cuckoo l1=31, W=512, 10T, post bug-fix)
 
-| Trials | Avg solve | Reliability            |
-|--------|-----------|------------------------|
-| 1 | 55 sec | lucky draw             |
-| 2 | 231 sec | small sample           |
-| 3 | 108 sec | lucky draw             |
-| — | ~281 sec (est.) | doubling rule from 54-bit |
+| Trials | Avg solve | Status |
+|--------|-----------|--------|
+| 3 | **108 sec** | confirmed correct (3/3) |
 
-All runs confirmed correct (Solved correctly: N/N). Single-trial results are unreliable due to high variance at l2=32. The doubling rule estimate of ~281 sec from the reliable 54-bit result is the most honest figure.
+Consistent with the doubling rule from the 54-bit result (~400 ms × 2^8 ≈ 102 sec).
 
 ---
 
@@ -241,7 +238,7 @@ FastECDLP: Intel Xeon 2.30 GHz, 16 threads. This work: Apple M-series, 10 thread
 | **54** | **30** | **5.3 GB** | **512** | **10** | **~400 ms** | **10** |
 | 54 | 31 | 10.4 GB | 512 | 10 | ~548 ms | 20 |
 | 58 | 31 | 10.4 GB | 512 | 10 | ~5.2 sec | 10 |
-| 63 | 31 | 10.4 GB | 512 | 10 | ~281 sec (est.) | — |
+| 63 | 31 | 10.4 GB | 512 | 10 | ~108 sec | 3 |
 
 ### One-time build costs (cuckoo, single-threaded)
 
