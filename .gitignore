@@ -22,3 +22,11 @@ kangaroo
 # Baby table cache files
 *.bin
 *.log
+bench_field
+fastecdlp_jacobian
+fastecdlp_original
+bsgs
+bsgs_mt
+bsgs_multi
+bsgs_dlp
+kangaroo
