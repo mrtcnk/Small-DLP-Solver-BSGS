@@ -18,7 +18,7 @@ our complete solver:
 | File | Description |
 |---|---|
 | `fastecdlp_baseline.c` | Faithful re-implementation of FastECDLP (Tang et al., 2022) |
-| `fastecdlp_original.c` | FastECDLP with parallelised Phase 1+2 (our extension) |
+| `fastecdlp_parallel.c` | FastECDLP with parallelised Phase 1+2 (our extension) |
 | `fastecdlp_jacobian.c` | FastECDLP + Jacobian loop (§3.1, eliminates T₂) |
 | `bsgs_dlp_benchmark_cached.c` | Complete solver: Jacobian loop + windowed batch inversion (§3.2) |
 | `bench_field.c` | Field operation microbenchmark (inv/mul ratio) |
@@ -112,7 +112,7 @@ cc -O3 -Wall -Wextra -o fastecdlp_baseline fastecdlp_baseline.c \
     -lsecp256k1 -lpthread
 
 # FastECDLP + parallel Phase 1+2
-cc -O3 -Wall -Wextra -o fastecdlp_original fastecdlp_original.c \
+cc -O3 -Wall -Wextra -o fastecdlp_parallel fastecdlp_parallel.c \
     -I/usr/local/include \
     -I/path/to/secp256k1/src \
     -L/usr/local/lib \
@@ -239,7 +239,7 @@ running alongside other large processes.
 - **Literature verification**: confirm that the Jacobian iterative walk
   combined with windowed batch inversion (eliminating T₂) has not appeared
   in Bernstein–Lange 2012, Galbraith et al. 2017, or Chatzigiannis et al.
-    2021.
+  2021.
 
 ---
 
