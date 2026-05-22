@@ -399,9 +399,24 @@ static void* search_worker(void* varg) {
          j < a->j_end && !atomic_load(a->found_flag); j++) {
 
         if (a->T2[j].infinity) {
-            if (verify_candidate(a->ctx, j*a->M, a->target33)) {
-                a->result_m=j*a->M; a->found=1;
-                atomic_store(a->found_flag,1);
+            /* T2[j] = j*M*G = O (point at infinity) means Pm - O = Pm = i*G
+             * Bug fix: look up Pm.x in baby table rather than calling
+             * verify_candidate directly — the old code skipped the lookup
+             * and only checked m=j*M, missing m=i cases. */
+            unsigned char buf[32]; secp256k1_fe_get_b32(buf, &a->Pm_x);
+            uint64_t x64=0;
+            for(int i=0;i<8;i++) x64=(x64<<8)|buf[i];
+            uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
+            int nc=map_get_all(a->baby,x64,cands);
+            for(int ci=0;ci<nc;ci++){
+                uint64_t m1=j*a->M+(uint64_t)cands[ci];
+                uint64_t m2=j*a->M-(uint64_t)cands[ci];
+                if(verify_candidate(a->ctx,m1,a->target33)){
+                    a->result_m=m1;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
+                if(verify_candidate(a->ctx,m2,a->target33)){
+                    a->result_m=m2;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
             }
             continue;
         }
@@ -460,10 +475,14 @@ static int fastecdlp_solve(const cuckoo_map* baby,
 
     /* ── Phase 1: sequential denom computation (matches Tang et al. C++ source)
      * BuildZAndTryZeroDiff in ahesm2.cc is a plain sequential loop.
-     * Only Phase 2 (TreeMon) and Phase 3 (search) are parallelised. ── */
+     * Only Phase 2 (TreeMon) and Phase 3 (search) are parallelised.
+     * Bug fix: detect zero denominator early —
+     * when denom[j]=0 it means Pm.x == T2[j].x, i.e. Pm = ±j*M*G (m = j*M),
+     * which would cause division by zero in batch inversion. ── */
     secp256k1_fe* denom = (secp256k1_fe*)malloc(J * sizeof(secp256k1_fe));
     if (!denom) { fprintf(stderr,"OOM: denom\n"); return 0; }
 
+    int found = 0;
     for (uint64_t j = 0; j < J; j++) {
         if (T2[j].infinity) {
             secp256k1_fe_set_int(&denom[j], 1);
@@ -473,8 +492,18 @@ static int fastecdlp_solve(const cuckoo_map* baby,
             secp256k1_fe_negate(&denom[j], &tx, 1);
             secp256k1_fe_add(&denom[j], &Pm_x);
             secp256k1_fe_normalize_var(&denom[j]);
+            if (secp256k1_fe_is_zero(&denom[j])) {
+                /* Pm = ±j*M*G — handle without batch inversion */
+                if (verify_candidate(ctx, j*M, target33)) {
+                    *out_m = j*M; found = 1; break;
+                }
+                if (verify_candidate(ctx, (uint64_t)(-(int64_t)(j*M)), target33)) {
+                    *out_m = (uint64_t)(-(int64_t)(j*M)); found = 1; break;
+                }
+            }
         }
     }
+    if (found) { free(denom); return 1; }
 
     /* ── Phase 2: parallel binary TreeMon ── */
     secp256k1_fe* tree = treemon(denom, J, threads);

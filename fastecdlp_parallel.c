@@ -1,7 +1,7 @@
 /*
- * fastecdlp_original.c
+ * fastecdlp_parallel.c
  *
- * Original FastECDLP algorithm (Tang et al., ePrint 2022/1573) on secp256k1.
+ * FastECDLP (Tang et al., ePrint 2022/1573) with parallelised Phase 1+2 on secp256k1.
  *
  * This implements Tang et al.'s approach faithfully:
  *   - Precompute T2 = {j*M*G in affine} for j in [0, 2^l2)  [one-time, saved to disk]
@@ -21,13 +21,13 @@
  * T2 cache file: fastecdlp_t2_secp256k1_l1_<l1>.bin
  *
  * Build:
- *   cc -O3 -Wall -Wextra -o fastecdlp_original fastecdlp_original.c \
+ *   cc -O3 -Wall -Wextra -o fastecdlp_parallel fastecdlp_parallel.c \
  *       -I/usr/local/include                                          \
  *       -I/path/to/secp256k1/src                                      \
  *       -L/usr/local/lib                                              \
  *       -lsecp256k1 -lpthread
  *
- * Usage: ./fastecdlp_original <bits> <l1> <trials> <threads>
+ * Usage: ./fastecdlp_parallel <bits> <l1> <trials> <threads>
  */
 
 #include <stdio.h>
@@ -322,14 +322,24 @@ static void* thread_fn(void* varg) {
     /* ── Phase 1: compute denominators denom[k] = Pm.x - T2[j].x ── */
     for (uint64_t k = 0; k < chunk; k++) {
         uint64_t j = a->j_start + k;
-        if (a->T2[j].infinity) {
-            secp256k1_fe_set_int(&denom[k], 1); /* placeholder */
-        } else {
-            secp256k1_fe tx = a->T2[j].x;
-            secp256k1_fe_normalize_var(&tx);
-            secp256k1_fe_negate(&denom[k], &tx, 1);
-            secp256k1_fe_add(&denom[k], &a->Pm_x);
-            secp256k1_fe_normalize_var(&denom[k]);
+        secp256k1_fe tx=a->T2[j].x;
+        secp256k1_fe_normalize_var(&tx);
+        secp256k1_fe_negate(&denom[k],&tx,1);
+        secp256k1_fe_add(&denom[k],&a->Pm_x);
+        secp256k1_fe_normalize_var(&denom[k]);
+        if(secp256k1_fe_is_zero(&denom[k])){
+            int64_t m1 = j*a->M;
+            int64_t m2 = -j*a->M;
+            if(verify_candidate(a->ctx,m1,a->target33)){
+                a->result_m=m1; a->found=1;
+                atomic_store(a->found_flag,1);
+            } else if(verify_candidate(a->ctx,m2,a->target33)){
+                a->result_m=m2; a->found=1;
+                atomic_store(a->found_flag,1);
+            }
+            /* skip Phase 2+3 — denom contains zero, cannot invert */
+            free(denom); free(inv_den); free(prefix);
+            return NULL;
         }
     }
 
@@ -348,15 +358,30 @@ static void* thread_fn(void* varg) {
     inv_den[0] = acc;
     free(prefix); free(denom);
 
+    secp256k1_fe x3;
+    unsigned char buf[32];
+    uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
+    int nc;
+    uint64_t x64=0;
     /* ── Phase 3: compute x(Pm - T2[j]) and look up ── */
     for (uint64_t k = 0; k < chunk && !atomic_load(a->found_flag); k++) {
         uint64_t j = a->j_start + k;
 
         if (a->T2[j].infinity) {
-            /* T2[j] = 0 => Pm - 0 = Pm => m = j*M */
-            if (verify_candidate(a->ctx, j * a->M, a->target33)) {
-                a->result_m = j * a->M; a->found = 1;
-                atomic_store(a->found_flag, 1);
+            x3 = a->Pm_x;
+            secp256k1_fe_get_b32(buf,&x3);
+            x64=0;
+            for(int i=0;i<8;i++) x64=(x64<<8)|buf[i];
+            nc=map_get_all(a->baby,x64,cands);
+            for(int ci=0;ci<nc;ci++){
+                int64_t m1=(uint64_t)cands[ci];
+                int64_t m2=-(uint64_t)cands[ci];
+                if(verify_candidate(a->ctx,m1,a->target33)){
+                    a->result_m=m1;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
+                if(verify_candidate(a->ctx,m2,a->target33)){
+                    a->result_m=m2;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
             }
             continue;
         }
@@ -466,7 +491,7 @@ static void benchmark(int bits, int l1, int trials, int threads) {
     double mem_t2_gb  = (double)(J * sizeof(secp256k1_ge)) / (1ULL<<30);
     double mem_thr_gb = (double)(chunk * 2 * sizeof(secp256k1_fe)) / (1ULL<<30);
 
-    printf("=== FastECDLP Original (Tang et al.) "
+    printf("=== FastECDLP Parallel (Tang et al. + our parallel Ph.1+2) "
            "— secp256k1, k=3 cuckoo, T2 table ===\n");
     printf("Range   : m in [0, 2^%d)\n", bits);
     printf("Split   : l1=%d, l2=%d  (J=%"PRIu64")\n", l1, l2, J);
@@ -536,7 +561,7 @@ static void benchmark(int bits, int l1, int trials, int threads) {
 }
 
 int main(int argc, char** argv) {
-    int bits = 52, l1 = 30, trials = 5, threads = 10;
+    int bits = 52, l1 = 28, trials = 5, threads = 10;
     if (argc >= 2) bits    = atoi(argv[1]);
     if (argc >= 3) l1      = atoi(argv[2]);
     if (argc >= 4) trials  = atoi(argv[3]);

@@ -23,10 +23,13 @@ our complete solver:
 | `bsgs_dlp_benchmark_cached.c` | Complete solver: Jacobian loop + windowed batch inversion (§3.2) |
 | `bench_field.c` | Field operation microbenchmark (inv/mul ratio) |
 
-**Note on `fastecdlp_treemon.c`:** Phase 1 is a sequential
+**Note on `fastecdlp_treemon.c` and `fastecdlp_parallel.c`:** Phase 1 is a sequential
 denominator loop matching `BuildZAndTryZeroDiff` in the Tang et al. C++ source;
 Phase 2 uses a parallel binary product tree matching `BuildInvTree` with
 `yacl::parallel_for` per depth level; Phase 3 is parallel search.
+Both files include fixes for two edge cases: (i) zero denominator when
+$P_m = j \cdot M \cdot G$ (would cause division by zero in batch inversion),
+and (ii) correct baby table lookup when $T_2[j]$ is the point at infinity.
 
 ---
 
@@ -173,17 +176,18 @@ precomputation are excluded. All results confirmed correct (N/N trials).
 
 | bits | l1 | FastECDLP (Tang et al.) | +Parallel Ph.1+2 | +Jacobian (§3.1) | This work (§3.1+§3.2) |
 |---|---|---|---|---|---|
-| 52 | 30 | 196 ms | **99 ms** | 207 ms | 213 ms (W=256) |
-| 54 | 30 | 635 ms | **482 ms** | 942 ms | 845 ms (W=512) |
-| 54 | 31 | 570 ms | 468 ms | 659 ms | **476 ms** (W=512) |
-| 58 | 31 | 105 sec† | 125 sec† | 145 sec† | **6.75 sec** |
+| 52 | 30 | 246 ms | **108 ms** | 207 ms | 213 ms (W=256) |
+| 54 | 30 | 758 ms | **382 ms** | 942 ms | 845 ms (W=512) |
+| 54 | 31 | 479 ms | 396 ms | 659 ms | **476 ms** (W=512) |
+| 58 | 31 | 61.6 sec† | 64.7 sec† | 122.7 sec† | **4.26 sec** |
 | 63 | 31 | infeasible | infeasible | infeasible | **164 sec** |
 
-† severe memory pressure (>21 GB total allocation on 32 GB machine)
+† severe memory pressure (>21 GB total allocation on 32 GB machine); results from 5 trials with cached T₂, pending re-run
 
 **Key results:**
-- At 54-bit (l1=31): our solver (476 ms) outperforms Tang et al. (570 ms), **1.2× faster** without any T₂ storage.
-- At 58-bit: our solver is **15× faster** than Tang et al. (6.75 sec vs 105 sec).
+- At 54-bit (l1=31): our solver (476 ms) outperforms Tang et al. (479 ms), **comparable speed** without any T₂ storage.
+- At 54-bit (l1=30): our parallel variant (382 ms) is **2× faster** than Tang et al. (758 ms).
+- At 58-bit: our solver is **~14.5× faster** than Tang et al. (4.26 sec vs 61.6 sec).
 - At 63-bit: our solver is the **only feasible approach** — FastECDLP's T₂ table would require 175 GB.
 
 ### Window Size Sweep (54-bit, l1=30, 10 threads, 10 trials)
