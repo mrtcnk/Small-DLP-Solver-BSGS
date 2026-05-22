@@ -34,3 +34,8 @@ fastecdlp_baseline
 fastecdlp_parallel
 fastecdlp_treemon
 bsgs_endomorphism
+fastecdlp_baseline
+fastecdlp_jacobian
+bsgs
+bsgs_baby_cuckoo_secp256k1_l1_28.bin
+bsgs_baby_ycoord_secp256k1_l1_28.bin
