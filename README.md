@@ -11,17 +11,22 @@ hashing. Covers the full XRPL MPT (XLS-33) plaintext range `[0, 2^63)`.
 
 EC-based Additively Homomorphic Encryption (AHE) schemes such as EC-ElGamal
 and Twisted ElGamal require solving a small ECDLP during decryption: recovering
-`m` from `m*G` where `m` is a bounded integer. This repository contains four
+`m` from `m*G` where `m` is a bounded integer. This repository contains five
 implementations enabling a clean progression from the Tang et al. baseline to
 our complete solver:
 
 | File | Description |
 |---|---|
-| `fastecdlp_baseline.c` | Faithful re-implementation of FastECDLP (Tang et al., 2022) |
+| `fastecdlp_treemon.c` | Faithful re-implementation of FastECDLP (Tang et al., 2022) |
 | `fastecdlp_parallel.c` | FastECDLP with parallelised Phase 1+2 (our extension) |
 | `fastecdlp_jacobian.c` | FastECDLP + Jacobian loop (§3.1, eliminates T₂) |
 | `bsgs_dlp_benchmark_cached.c` | Complete solver: Jacobian loop + windowed batch inversion (§3.2) |
 | `bench_field.c` | Field operation microbenchmark (inv/mul ratio) |
+
+**Note on `fastecdlp_treemon.c`:** Phase 1 is a sequential
+denominator loop matching `BuildZAndTryZeroDiff` in the Tang et al. C++ source;
+Phase 2 uses a parallel binary product tree matching `BuildInvTree` with
+`yacl::parallel_for` per depth level; Phase 3 is parallel search.
 
 ---
 
@@ -104,8 +109,8 @@ cc -O3 -Wall -Wextra -o bsgs bsgs_dlp_benchmark_cached.c \
     -L/usr/local/lib \
     -lsecp256k1 -lpthread
 
-# FastECDLP baseline (Tang et al. faithful)
-cc -O3 -Wall -Wextra -o fastecdlp_baseline fastecdlp_baseline.c \
+# FastECDLP faithful (Tang et al.)
+cc -O3 -Wall -Wextra -o fastecdlp_treemon fastecdlp_treemon.c \
     -I/usr/local/include \
     -I/path/to/secp256k1/src \
     -L/usr/local/lib \
@@ -153,7 +158,7 @@ Replace `/path/to/secp256k1/src` with your secp256k1 source directory.
 
 **Recommended 54-bit configuration:**
 ```bash
-./bsgs 54 30 10 10 512
+./bsgs 54 31 10 10 512
 ```
 
 ---
@@ -164,21 +169,22 @@ Hardware: Apple M-series, 32 GB RAM, 10 threads.
 All results show search time only — one-time baby table build and T₂
 precomputation are excluded. All results confirmed correct (N/N trials).
 
-### Four-Way On-Machine Comparison
+### Five-Way On-Machine Comparison
 
-| bits | l1 | Baseline (Tang et al.) | +Parallel Ph.1+2 | +Jacobian (§3.1) | This work (§3.1+§3.2) |
+| bits | l1 | FastECDLP (Tang et al.) | +Parallel Ph.1+2 | +Jacobian (§3.1) | This work (§3.1+§3.2) |
 |---|---|---|---|---|---|
-| 52 | 30 | 370 ms | **99 ms** | 207 ms | 213 ms (W=256) |
-| 54 | 30 | 1474 ms | **482 ms** | 942 ms | 845 ms (W=512) |
-| 54 | 31 | 768 ms | **468 ms** | 659 ms | **476 ms** (W=512) |
-| 58 | 31 | 119 sec† | 125 sec† | 145 sec† | **6.75 sec** |
+| 52 | 30 | 196 ms | **99 ms** | 207 ms | 213 ms (W=256) |
+| 54 | 30 | 635 ms | **482 ms** | 942 ms | 845 ms (W=512) |
+| 54 | 31 | 570 ms | 468 ms | 659 ms | **476 ms** (W=512) |
+| 58 | 31 | 105 sec† | 125 sec† | 145 sec† | **6.75 sec** |
 | 63 | 31 | infeasible | infeasible | infeasible | **164 sec** |
 
 † severe memory pressure (>21 GB total allocation on 32 GB machine)
 
-**Key result:** At 58-bit our solver is **21× faster** than the baseline.
-At 63-bit our solver is the **only feasible approach** — FastECDLP's T₂
-table would require 175 GB.
+**Key results:**
+- At 54-bit (l1=31): our solver (476 ms) outperforms Tang et al. (570 ms), **1.2× faster** without any T₂ storage.
+- At 58-bit: our solver is **15× faster** than Tang et al. (6.75 sec vs 105 sec).
+- At 63-bit: our solver is the **only feasible approach** — FastECDLP's T₂ table would require 175 GB.
 
 ### Window Size Sweep (54-bit, l1=30, 10 threads, 10 trials)
 
@@ -209,14 +215,10 @@ Performance drop at W=2048 reflects L2 cache pressure
 | bits | l1 | Table | W | Avg solve | Trials |
 |---|---|---|---|---|---|
 | 52 | 30 | 5.3 GB | 256 | ~213 ms | 10 |
-| **54** | **30** | **5.3 GB** | **512** | **~845 ms** | **10** |
-| 54 | 31 | 10.4 GB | 512 | ~476 ms | 10 |
+| 54 | 30 | 5.3 GB | 512 | ~845 ms | 10 |
+| **54** | **31** | **10.4 GB** | **512** | **~476 ms** | **10** |
 | 58 | 31 | 10.4 GB | 512 | ~6.75 sec | 10 |
 | 63 | 31 | 10.4 GB | 512 | ~164 sec | 10 |
-
-**Note on 54-bit configuration:** l1=31 (476 ms) is faster than l1=30
-(845 ms) when memory is not under pressure. l1=30 is recommended when
-running alongside other large processes.
 
 ### One-time baby table build costs (single-threaded)
 
