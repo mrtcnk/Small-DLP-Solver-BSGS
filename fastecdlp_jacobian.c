@@ -1,5 +1,5 @@
 /*
- * fastecdlp_baseline.c  —  parallel FastECDLP implementation
+ * fastecdlp_jacobian.c  —  parallel FastECDLP implementation
  *
  * Faithful multi-threaded implementation of FastECDLP
  * (Tang et al., ePrint 2022/1573) on secp256k1.
@@ -15,13 +15,13 @@
  *   54-bit T=10: 16M/10 * ~200 bytes = ~320 MB/thread
  *
  * Build:
- *   cc -O3 -Wall -Wextra -o fastecdlp_baseline fastecdlp_baseline.c \
+ *   cc -O3 -Wall -Wextra -o fastecdlp_jacobian fastecdlp_jacobian.c \
  *       -I/usr/local/include                                          \
  *       -I/path/to/secp256k1/src                                      \
  *       -L/usr/local/lib                                              \
  *       -lsecp256k1 -lpthread
  *
- * Usage: ./fastecdlp_baseline <bits> <l1> <trials> <threads>
+ * Usage: ./fastecdlp_jacobian <bits> <l1> <trials> <threads>
  */
 
 #include <stdio.h>
@@ -93,17 +93,14 @@ static int verify_candidate(const secp256k1_context* ctx,
     return memcmp(got, target33, 33) == 0;
 }
 
-static uint64_t gej_x64_from_zinv(const secp256k1_gej* pt,
-                                  const secp256k1_fe*  z_inv) {
+static void gej_xb32_from_zinv(const secp256k1_gej* pt,
+                               const secp256k1_fe*  z_inv,
+                               unsigned char buf[32]) {
     secp256k1_fe z2, x;
     secp256k1_fe_sqr(&z2, z_inv);
     secp256k1_fe_mul(&x, &pt->x, &z2);
     secp256k1_fe_normalize_var(&x);
-    unsigned char buf[32];
     secp256k1_fe_get_b32(buf, &x);
-    uint64_t h = 0;
-    for (int k = 0; k < 8; k++) h = (h << 8) | (uint64_t)buf[k];
-    return h;
 }
 
 /* ─────────────────────── I/O ─────────────────────────────────────── */
@@ -123,8 +120,7 @@ static int read_all(int fd, void* buf, size_t len) {
 
 #define CUCKOO_K        3
 #define CUCKOO_STASH_SZ 16
-#define CUCKOO_SEED1    0x9e3779b97f4a7c15ULL
-#define CUCKOO_SEED2    0xd1b54a32d192ed03ULL
+
 #define BABY_MAGIC      0x4B43554B4F4F4355ULL
 
 typedef struct { uint32_t key; uint32_t val; } entry_packed;
@@ -132,7 +128,7 @@ typedef struct { uint32_t key; uint32_t val; } entry_packed;
 typedef struct {
     entry_packed* tab;
     size_t section_size, total_bins, size;
-    uint64_t stash_x64[CUCKOO_STASH_SZ];
+    unsigned char stash_xb[CUCKOO_STASH_SZ][32];
     uint32_t stash_val[CUCKOO_STASH_SZ];
     int stash_count;
 } cuckoo_map;
@@ -143,32 +139,31 @@ typedef struct {
     int32_t stash_count; uint32_t _pad;
 } baby_hdr;
 
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31; return x;
+static inline uint32_t u32be(const unsigned char* b) {
+    return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|
+    ((uint32_t)b[2]<<8)|(uint32_t)b[3];
 }
-static size_t fastrange64(uint64_t h, size_t n) {
-    return (size_t)((__uint128_t)h * (__uint128_t)n >> 64);
+static inline size_t cpos(int sec, const unsigned char xb[32], size_t s) {
+    uint32_t h = u32be(xb + sec * 8);
+    return (size_t)((__uint128_t)h * (__uint128_t)s >> 32) + (size_t)sec * s;
 }
-static size_t cpos(int sec, uint64_t x64, size_t s) {
-    uint64_t seed = (sec == 0) ? 0ULL :
-                    (sec == 1) ? CUCKOO_SEED1 : CUCKOO_SEED2;
-    return fastrange64(mix64(x64 ^ seed), s) + (size_t)sec * s;
+static inline uint32_t ckey(int sec, const unsigned char xb[32]) {
+    return u32be(xb + sec * 8 + 4);
 }
-static int map_get_all(const cuckoo_map* m, uint64_t x64, uint32_t* out) {
-    uint32_t k = (uint32_t)(x64 >> 32); size_t s = m->section_size; int n = 0;
+static int map_get_all(const cuckoo_map* m, const unsigned char xb[32], uint32_t* out) {
+    size_t s = m->section_size; int n = 0;
     const entry_packed* e;
-    e=&m->tab[cpos(0,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    e=&m->tab[cpos(1,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    e=&m->tab[cpos(2,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    for(int i=0;i<m->stash_count;i++) if(m->stash_x64[i]==x64) out[n++]=m->stash_val[i];
+    e=&m->tab[cpos(0,xb,s)]; if(e->val&&e->key==ckey(0,xb)) out[n++]=e->val;
+    e=&m->tab[cpos(1,xb,s)]; if(e->val&&e->key==ckey(1,xb)) out[n++]=e->val;
+    e=&m->tab[cpos(2,xb,s)]; if(e->val&&e->key==ckey(2,xb)) out[n++]=e->val;
+    for(int i=0;i<m->stash_count;i++)
+        if(memcmp(m->stash_xb[i],xb,32)==0) out[n++]=m->stash_val[i];
     return n;
 }
 
 static int load_baby_table(cuckoo_map* baby, int l1) {
     char fname[128];
-    snprintf(fname, sizeof(fname), "bsgs_baby_cuckoo_secp256k1_l1_%d.bin", l1);
+    snprintf(fname, sizeof(fname), "bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin", l1);
     int fd = open(fname, O_RDONLY);
     if (fd < 0) { perror(fname); return 0; }
     baby_hdr hdr;
@@ -181,7 +176,7 @@ static int load_baby_table(cuckoo_map* baby, int l1) {
     baby->total_bins   = CUCKOO_K * (size_t)hdr.section_size;
     baby->size         = (size_t)hdr.used_count;
     baby->stash_count  = (int)hdr.stash_count;
-    if (!read_all(fd, baby->stash_x64, sizeof(baby->stash_x64)) ||
+    if (!read_all(fd, baby->stash_xb, sizeof(baby->stash_xb)) ||
         !read_all(fd, baby->stash_val, sizeof(baby->stash_val))) {
         close(fd); return 0;
     }
@@ -272,9 +267,10 @@ static void* thread_fn(void* arg) {
             }
             continue;
         }
-        uint64_t x64 = gej_x64_from_zinv(&Qjac[k], &z_inv[k]);
+        unsigned char xb[32];
+        gej_xb32_from_zinv(&Qjac[k], &z_inv[k], xb);
         uint32_t cands[CUCKOO_K + CUCKOO_STASH_SZ];
-        int nc = map_get_all(a->baby, x64, cands);
+        int nc = map_get_all(a->baby, xb, cands);
         for (int ci = 0; ci < nc; ci++) {
             uint64_t m1 = j * a->M + (uint64_t)cands[ci];
             uint64_t m2 = j * a->M - (uint64_t)cands[ci];
@@ -384,7 +380,7 @@ static void benchmark(int bits, int l1, int trials, int threads) {
             (double)(chunk * (sizeof(secp256k1_gej) + 2*sizeof(secp256k1_fe)))
             / (1ULL<<30);
 
-    printf("=== FastECDLP Baseline "
+    printf("=== FastECDLP Jacobian "
            "(secp256k1, k=3 cuckoo, parallel full-batch) ===\n");
     printf("Range   : m in [0, 2^%d)\n", bits);
     printf("Split   : l1=%d, l2=%d  (J=%"PRIu64")\n", l1, l2, J);

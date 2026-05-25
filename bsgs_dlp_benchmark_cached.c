@@ -38,7 +38,6 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-#define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 /* ---------------- timing ---------------- */
 
 static double now_seconds(void) {
@@ -158,16 +157,12 @@ static void ge_negate(secp256k1_ge* out, const secp256k1_ge* in) {
     secp256k1_fe_normalize_var(&out->y);
 }
 
-/* Extract the first 8 bytes of the x-coordinate as a uint64 (big-endian).
- * Used as the 64-bit truncated key for the hash table. */
-static uint64_t ge_x64(const secp256k1_ge* ge) {
+/* Extract full 32-byte x-coordinate (big-endian) into buf.
+ * Used as the hash input for Tang et al. window-based cuckoo hashing. */
+static void ge_xb32(const secp256k1_ge* ge, unsigned char buf[32]) {
     secp256k1_fe x = ge->x;
     secp256k1_fe_normalize_var(&x);
-    unsigned char buf[32];
     secp256k1_fe_get_b32(buf, &x);
-    uint64_t h = 0;
-    for (int i = 0; i < 8; i++) h = (h << 8) | (uint64_t)buf[i];
-    return h;
 }
 
 /*
@@ -225,17 +220,14 @@ static void fe_batch_invert_tree(secp256k1_fe* bt1,
     }
 }
 
-static uint64_t gej_x64_from_zinv(const secp256k1_gej* pt,
-                                  const secp256k1_fe*  z_inv) {
+static void gej_xb32_from_zinv(const secp256k1_gej* pt,
+                               const secp256k1_fe*  z_inv,
+                               unsigned char buf[32]) {
     secp256k1_fe z2, x;
     secp256k1_fe_sqr(&z2, z_inv);
     secp256k1_fe_mul(&x, &pt->x, &z2);
     secp256k1_fe_normalize_var(&x);
-    unsigned char buf[32];
     secp256k1_fe_get_b32(buf, &x);
-    uint64_t h = 0;
-    for (int k = 0; k < 8; k++) h = (h << 8) | (uint64_t)buf[k];
-    return h;
 }
 
 /* ================================================================
@@ -246,8 +238,8 @@ static uint64_t gej_x64_from_zinv(const secp256k1_gej* pt,
  *   - 3 hash functions map x64 into 3 disjoint sections of size
  *     section_size ≈ 1.3n/3 each.  Total bins ≈ 1.3n.
  *   - Lookup: O(1) worst-case — exactly 3 probes (+ tiny stash).
- *   - Build: uses 12-byte build_entry (full x64 + val) for eviction,
- *     then compacts to 8-byte entry_packed (upper32(x64) + val).
+ *   - Build: two-pass, 12-byte build_entry (3 positions + val),
+ *     then compact to 8-byte entry_packed, then second pass fills keys.
  *
  * Memory vs open-addressing (load 0.5):
  *   l1=30: 1.3×8×2^29 ≈  5.6 GB  (was  8 GB)
@@ -262,21 +254,23 @@ static uint64_t gej_x64_from_zinv(const secp256k1_gej* pt,
 #define CUCKOO_K          3
 #define CUCKOO_MAX_RELOC  512
 #define CUCKOO_STASH_SZ   16
-#define CUCKOO_SEED1      0x9e3779b97f4a7c15ULL
-#define CUCKOO_SEED2      0xd1b54a32d192ed03ULL
 
 /* ---- types ---- */
 
 /* 8-byte lookup entry — kept in memory after build */
 typedef struct {
-    uint32_t key;   /* upper 32 bits of x64 — discriminator */
-    uint32_t val;   /* i value; 0 = empty                   */
+    uint32_t key;   /* per-section 4-byte window key — discriminator */
+    uint32_t val;   /* i value; 0 = empty                            */
 } entry_packed;
 
-/* 12-byte build entry — used during cuckoo construction only */
-typedef struct __attribute__((packed)) {
-    uint64_t x64;   /* full key (needed for eviction rehashing) */
-    uint32_t val;   /* i value; 0 = empty                       */
+/* 12-byte build entry — used during cuckoo construction only.
+ * Stores only precomputed positions (for eviction rehashing) and val.
+ * Keys are NOT stored here — they are filled in a second pass after
+ * compaction by re-walking the i*G points. This keeps build memory
+ * at 12 bytes/entry matching the original implementation. */
+typedef struct {
+    uint32_t pos[3];  /* precomputed position within each section (offset from section base) */
+    uint32_t val;     /* i value; 0 = empty */
 } build_entry;
 
 /* cuckoo map (lookup phase, after compaction) */
@@ -286,40 +280,47 @@ typedef struct {
     size_t        total_bins;   /* 3 × section_size                */
     size_t        size;         /* entries successfully inserted    */
     /* overflow stash (rare: ~0 entries with load 1.3×, k=3) */
-    uint64_t stash_x64[CUCKOO_STASH_SZ];
+    unsigned char stash_xb[CUCKOO_STASH_SZ][32];
     uint32_t stash_val[CUCKOO_STASH_SZ];
     int      stash_count;
 } cuckoo_map;
 
 /* ---- helpers ---- */
 
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31; return x;
+/* Tang et al. window-based cuckoo hash (Section IV.C.2):
+ * The full 32-byte x-coordinate X is split into three 8-byte windows.
+ * Each window contributes 4 bytes for position and 4 bytes for key:
+ *   Window 0: X[0:4]  → position, X[4:8]   → key
+ *   Window 1: X[8:12] → position, X[12:16] → key
+ *   Window 2: X[16:20]→ position, X[20:24] → key
+ *   X[24:31] unused
+ * No mixing function — raw byte extraction. */
+
+static inline uint32_t u32be(const unsigned char* b) {
+    return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|
+    ((uint32_t)b[2]<<8)|(uint32_t)b[3];
 }
 
-/* Fast uniform mapping to [0, n) — no power-of-2 required */
-static inline size_t fastrange64(uint64_t h, size_t n) {
-return (size_t)((__uint128_t)h * (__uint128_t)n >> 64);
+/* Position within section for (section, xb) */
+static inline size_t cpos(int sec, const unsigned char xb[32], size_t s) {
+    uint32_t h = u32be(xb + sec * 8);
+    return (size_t)((__uint128_t)h * (__uint128_t)s >> 32) + (size_t)sec * s;
 }
 
-/* Position within the flat array for (section, x64) */
-static inline size_t cpos(int sec, uint64_t x64, size_t s) {
-    uint64_t seed = (sec == 0) ? 0ULL :
-                    (sec == 1) ? CUCKOO_SEED1 : CUCKOO_SEED2;
-    return fastrange64(mix64(x64 ^ seed), s) + (size_t)sec * s;
+/* Per-section fingerprint key */
+static inline uint32_t ckey(int sec, const unsigned char xb[32]) {
+    return u32be(xb + sec * 8 + 4);
 }
 
 /* ---- lookup (O(1), 3 probes + stash) ---- */
 
 /*
- * map_get_all(): collect ALL candidates matching x64's upper-32-bit key
+ * map_get_all(): collect ALL candidates matching xb window keys
  * across all 3 cuckoo sections and the stash.
  *
  * Why this is necessary:
- *   The stored key is only the upper 32 bits of x64.  A different x64'
- *   with the same upper 32 bits (a "false positive") may occupy one of
+ *   Each section uses an independent 4-byte window key. A different xb'
+ *   sharing the same window key (a "false positive") may occupy one of
  *   the 3 positions before the real entry.  If map_get() returned on the
  *   first match, verify_candidate() would reject the false positive and
  *   the real entry would be silently skipped.
@@ -334,75 +335,64 @@ static inline size_t cpos(int sec, uint64_t x64, size_t s) {
  * out[]  : caller-supplied array of at least (3 + CUCKOO_STASH_SZ) uint32_t
  * returns: number of candidates found (0 = definite miss)
  */
-static int map_get_all(const cuckoo_map* m, uint64_t x64,
+static int map_get_all(const cuckoo_map* m, const unsigned char xb[32],
                        uint32_t* out) {
-    uint32_t k = (uint32_t)(x64 >> 32);
-    size_t   s = m->section_size;
-    int      n = 0;
+    size_t s = m->section_size;
+    int    n = 0;
 
     const entry_packed* e;
-    e = &m->tab[cpos(0, x64, s)];
-    if (e->val && e->key == k) out[n++] = e->val;
-    e = &m->tab[cpos(1, x64, s)];
-    if (e->val && e->key == k) out[n++] = e->val;
-    e = &m->tab[cpos(2, x64, s)];
-    if (e->val && e->key == k) out[n++] = e->val;
+    e = &m->tab[cpos(0, xb, s)];
+    if (e->val && e->key == ckey(0, xb)) out[n++] = e->val;
+    e = &m->tab[cpos(1, xb, s)];
+    if (e->val && e->key == ckey(1, xb)) out[n++] = e->val;
+    e = &m->tab[cpos(2, xb, s)];
+    if (e->val && e->key == ckey(2, xb)) out[n++] = e->val;
 
     for (int i = 0; i < m->stash_count; i++)
-        if (m->stash_x64[i] == x64) out[n++] = m->stash_val[i];
+        if (memcmp(m->stash_xb[i], xb, 32) == 0) out[n++] = m->stash_val[i];
 
     return n;
 }
 
-/* Convenience wrapper: returns first verified candidate via ±i check.
- * Use map_get_all() directly in hot loops for efficiency. */
-static int map_get(const cuckoo_map* m, uint64_t x64, uint32_t* out) {
-    uint32_t cands[3 + CUCKOO_STASH_SZ];
-    int nc = map_get_all(m, x64, cands);
-    if (!nc) return 0;
-    *out = cands[0];   /* caller must verify all candidates if nc > 1 */
-    return 1;
-}
+
 
 /* ---- cuckoo insert into BUILD table ---- */
 
 static int cuckoo_insert_build(build_entry* btab, size_t s,
                                cuckoo_map* m,
-                               uint64_t x64, uint32_t val) {
-    uint64_t cur_x64 = x64;
-    uint32_t cur_val = val;
+                               const unsigned char xb[32], uint32_t val) {
+    build_entry cur;
+    for (int k = 0; k < CUCKOO_K; k++)
+        cur.pos[k] = (uint32_t)(cpos(k, xb, s) - (size_t)k * s);
+    cur.val = val;
     int sec = 0;
 
     for (int iter = 0; iter < CUCKOO_MAX_RELOC; iter++) {
-        size_t pos = cpos(sec, cur_x64, s);
+        size_t pos = (size_t)cur.pos[sec] + (size_t)sec * s;
 
         if (btab[pos].val == 0) {
-            /* empty slot — insert */
-            btab[pos].x64 = cur_x64;
-            btab[pos].val = cur_val;
+            btab[pos] = cur;
             m->size++;
             return 1;
         }
 
         /* occupied — evict and continue */
-        uint64_t ev_x64 = btab[pos].x64;
-        uint32_t ev_val = btab[pos].val;
-        btab[pos].x64   = cur_x64;
-        btab[pos].val   = cur_val;
-        cur_x64 = ev_x64;
-        cur_val = ev_val;
+        build_entry ev = btab[pos];
+        btab[pos] = cur;
+        cur = ev;
         sec = (sec + 1) % CUCKOO_K;
     }
 
     /* eviction chain too long — fall back to stash */
     if (m->stash_count < CUCKOO_STASH_SZ) {
-        m->stash_x64[m->stash_count] = cur_x64;
-        m->stash_val[m->stash_count] = cur_val;
+        /* stash stores val only; keys filled in second pass */
+        memset(m->stash_xb[m->stash_count], 0, 32);
+        m->stash_val[m->stash_count] = cur.val;
         m->stash_count++;
         m->size++;
         return 1;
     }
-    return 0; /* stash full — should not happen with 1.3× load, k=3 */
+    return 0;
 }
 
 /* ---- build then compact: 12-byte → 8-byte ---- */
@@ -436,10 +426,10 @@ static int cuckoo_compact(cuckoo_map* m, build_entry* btab) {
     m->tab = (entry_packed*)calloc(total, sizeof(entry_packed));
     if (!m->tab) { free(btab); return 0; }
 
-    for (size_t i = 0; i < total; i++) {
-        m->tab[i].key = (uint32_t)(btab[i].x64 >> 32);
+    /* Copy vals only — keys are filled in a second pass by re-walking i*G */
+    for (size_t i = 0; i < total; i++)
         m->tab[i].val = btab[i].val;
-    }
+
     free(btab);
     return 1;
 }
@@ -465,7 +455,7 @@ typedef struct {
 } baby_hdr;
 
 static void baby_cache_path(char* out, size_t outlen, int l1) {
-    snprintf(out, outlen, "bsgs_baby_cuckoo_secp256k1_l1_%d.bin", l1);
+    snprintf(out, outlen, "bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin", l1);
 }
 
 static int baby_save(const char* path, int l1, const cuckoo_map* baby) {
@@ -483,7 +473,7 @@ static int baby_save(const char* path, int l1, const cuckoo_map* baby) {
 
     int ok = write_all(fd, &hdr, sizeof(hdr));
     /* stash */
-    ok &= write_all(fd, baby->stash_x64, sizeof(baby->stash_x64));
+    ok &= write_all(fd, baby->stash_xb, sizeof(baby->stash_xb));
     ok &= write_all(fd, baby->stash_val, sizeof(baby->stash_val));
     /* main table */
     ok &= write_all(fd, baby->tab, baby->total_bins * sizeof(entry_packed));
@@ -509,7 +499,7 @@ static int baby_load(const char* path, int expected_l1, cuckoo_map* baby_out) {
     baby_out->size         = (size_t)hdr.used_count;
     baby_out->stash_count  = (int)hdr.stash_count;
 
-    if (!read_all(fd, baby_out->stash_x64, sizeof(baby_out->stash_x64)) ||
+    if (!read_all(fd, baby_out->stash_xb, sizeof(baby_out->stash_xb)) ||
         !read_all(fd, baby_out->stash_val, sizeof(baby_out->stash_val))) {
         close(fd); return 0;
     }
@@ -579,12 +569,13 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
     }
 
     /*
-     * Build cuckoo table.
+     * Build cuckoo table — two-pass approach:
      *
-     * Phase 1: allocate 12-byte build_entry table (section_size computed
-     *          inside cuckoo_alloc_build from n = Mhalf-1).
-     * Phase 2: walk i*G for i in [1, Mhalf), insert each (x64, i).
-     * Phase 3: compact 12-byte → 8-byte, free build table.
+     * Pass 1: walk i*G, insert (positions, val) into 12-byte build table.
+     *         No keys stored — keeps build memory at 12 bytes/entry.
+     * Compact: allocate 8-byte packed table, copy vals only.
+     * Pass 2: re-walk i*G, fill per-section keys into packed table.
+     *         Also fill stash xb[] for exact stash matching.
      */
     size_t n = (size_t)(b->Mhalf - 1);
     build_entry* btab = cuckoo_alloc_build(&b->baby, n);
@@ -599,14 +590,15 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
     unsigned char ser[33];
     size_t s = b->baby.section_size;
 
+    /* Pass 1: insert positions */
     for (uint64_t i = 1; i < b->Mhalf; i++) {
         if (!pubkey_serialize33(ctx, &cur, ser)) {
             free(btab); map_free(&b->baby); return 0;
         }
-        uint64_t x64 = 0;
-        for (int k = 1; k <= 8; k++) x64 = (x64 << 8) | ser[k];
+        unsigned char xb[32];
+        memcpy(xb, ser + 1, 32);
 
-        if (!cuckoo_insert_build(btab, s, &b->baby, x64, (uint32_t)i)) {
+        if (!cuckoo_insert_build(btab, s, &b->baby, xb, (uint32_t)i)) {
             fprintf(stderr, "cuckoo insert failed at i=%llu\n",
                     (unsigned long long)i);
             free(btab); map_free(&b->baby); return 0;
@@ -624,10 +616,41 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
 
     printf("  Stash used: %d entries\n", b->baby.stash_count);
 
-    /* Compact: 12-byte build entries → 8-byte lookup entries */
+    /* Compact: vals only, keys to be filled in Pass 2 */
     if (!cuckoo_compact(&b->baby, btab)) {
         fprintf(stderr, "cuckoo_compact failed\n");
         map_free(&b->baby); return 0;
+    }
+
+    /* Pass 2: re-walk i*G, fill per-section keys into packed table */
+    cur = b->G;
+    for (uint64_t i = 1; i < b->Mhalf; i++) {
+        if (!pubkey_serialize33(ctx, &cur, ser)) {
+            map_free(&b->baby); return 0;
+        }
+        unsigned char xb[32];
+        memcpy(xb, ser + 1, 32);
+
+        /* find which slot(s) hold this i and fill the key */
+        for (int sec = 0; sec < CUCKOO_K; sec++) {
+            size_t pos = cpos(sec, xb, s);
+            if (b->baby.tab[pos].val == (uint32_t)i)
+            b->baby.tab[pos].key = ckey(sec, xb);
+        }
+        /* fill stash xb if this i is in the stash */
+        for (int si = 0; si < b->baby.stash_count; si++) {
+            if (b->baby.stash_val[si] == (uint32_t)i)
+            memcpy(b->baby.stash_xb[si], xb, 32);
+        }
+
+        if (i + 1 < b->Mhalf) {
+            const secp256k1_pubkey* pts[2] = { &cur, &b->G };
+            secp256k1_pubkey nxt;
+            if (!secp256k1_ec_pubkey_combine(ctx, &nxt, pts, 2)) {
+                map_free(&b->baby); return 0;
+            }
+            cur = nxt;
+        }
     }
 
     printf("  Compacted to %.2f MB (8-byte entries)\n",
@@ -676,16 +699,16 @@ static int bsgs_solve(const bsgs_ctx* b,
     unsigned char t33[33];
     if (!pubkey_serialize33(ctx, targetPm, t33)) return 0;
 
-    uint64_t tx64 = 0;
-    for (int i = 1; i <= 8; i++) tx64 = (tx64 << 8) | t33[i];
+    unsigned char txb[32];
+    memcpy(txb, t33 + 1, 32); /* x-coordinate from compressed pubkey */
 
     {
         uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, tx64, cands);
+        int nc = map_get_all(&b->baby, txb, cands);
         for (int ci = 0; ci < nc; ci++)
             if (verify_candidate(ctx, (uint64_t)cands[ci], t33)) {
-            *out_m = (uint64_t)cands[ci]; return 1;
-        }
+                *out_m = (uint64_t)cands[ci]; return 1;
+            }
     }
 
     secp256k1_ge target_ge;
@@ -730,9 +753,10 @@ static int bsgs_solve(const bsgs_ctx* b,
         fe_batch_invert_tree(bt1, bt2, W);
 
         for (size_t w = 0; w < W && !result; w++) {
-            uint64_t qx64 = gej_x64_from_zinv(&Q_win[w], &bt2[W + w]);
+            unsigned char qxb[32];
+            gej_xb32_from_zinv(&Q_win[w], &bt2[W + w], qxb);
             uint32_t cands[3 + CUCKOO_STASH_SZ];
-            int nc = map_get_all(&b->baby, qx64, cands);
+            int nc = map_get_all(&b->baby, qxb, cands);
             for (int ci = 0; ci < nc && !result; ci++) {
                 uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
                 uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
@@ -747,9 +771,10 @@ static int bsgs_solve(const bsgs_ctx* b,
         if (gej_eq_ge(&jMGj, &target_ge)) { *out_m = j * b->M; result = 1; break; }
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
-        uint64_t qx64 = ge_x64(&Q_ge);
+        unsigned char qxb[32];
+        ge_xb32(&Q_ge, qxb);
         uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, qx64, cands);
+        int nc = map_get_all(&b->baby, qxb, cands);
         for (int ci = 0; ci < nc && !result; ci++) {
             uint64_t m1 = j * b->M + (uint64_t)cands[ci];
             uint64_t m2 = j * b->M - (uint64_t)cands[ci];
@@ -787,7 +812,7 @@ static void* bsgs_worker_thread(void* argp) {
     const bsgs_ctx*   b = a->b;
     size_t            W = (size_t)a->window;
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
     if (!ctx) return NULL;
 
     secp256k1_gej* Q_win = (secp256k1_gej*)malloc(W * sizeof(secp256k1_gej));
@@ -853,9 +878,10 @@ static void* bsgs_worker_thread(void* argp) {
             if (atomic_load_explicit(a->found, memory_order_relaxed)) {
                 found_in_window = 1; break;
             }
-            uint64_t qx64 = gej_x64_from_zinv(&Q_win[w], &bt2[W + w]);
+            unsigned char qxb[32];
+            gej_xb32_from_zinv(&Q_win[w], &bt2[W + w], qxb);
             uint32_t cands[3 + CUCKOO_STASH_SZ];
-            int nc = map_get_all(&b->baby, qx64, cands);
+            int nc = map_get_all(&b->baby, qxb, cands);
             for (int ci = 0; ci < nc && !found_in_window; ci++) {
                 uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
                 uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
@@ -891,9 +917,10 @@ static void* bsgs_worker_thread(void* argp) {
         }
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
-        uint64_t qx64 = ge_x64(&Q_ge);
+        unsigned char qxb[32];
+        ge_xb32(&Q_ge, qxb);
         uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, qx64, cands);
+        int nc = map_get_all(&b->baby, qxb, cands);
         int got_it = 0;
         for (int ci = 0; ci < nc && !got_it; ci++) {
             uint64_t m1 = j * b->M + (uint64_t)cands[ci];
@@ -934,15 +961,15 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     if (!pubkey_serialize33(ctx0, targetPm, t33)) return 0;
 
     /* j=0: direct baby lookup */
-    uint64_t tx64 = 0;
-    for (int i = 1; i <= 8; i++) tx64 = (tx64 << 8) | t33[i];
+    unsigned char txb[32];
+    memcpy(txb, t33 + 1, 32); /* x-coordinate from compressed pubkey */
     {
         uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, tx64, cands);
+        int nc = map_get_all(&b->baby, txb, cands);
         for (int ci = 0; ci < nc; ci++)
             if (verify_candidate(ctx0, (uint64_t)cands[ci], t33)) {
-            *out_m = (uint64_t)cands[ci]; return 1;
-        }
+                *out_m = (uint64_t)cands[ci]; return 1;
+            }
     }
 
     uint64_t J = b->J;
@@ -996,7 +1023,8 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
  * Benchmark
  * ================================================================ */
 
-static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, int window) {
+static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
+                           int window, uint64_t fixed_m, const char* hex_pk) {
     printf("=== BSGS (secp256k1, cuckoo k=3, Jacobian, windowed TreeMon) ===\n");
     printf("Range  : m in [0, 2^%d)\n", bits_total);
     printf("Split  : l1=%d, l2=%d\n", l1, bits_total - l1);
@@ -1004,7 +1032,7 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, int 
     printf("Entry  : %zu bytes lookup | Trials: %d | Threads: %d\n\n",
            sizeof(entry_packed), trials, threads);
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
     if (!ctx) { printf("Failed to create context\n"); return; }
 
     bsgs_ctx solver;
@@ -1018,14 +1046,67 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, int 
            (double)(solver.baby.total_bins * sizeof(entry_packed)) / (1 << 20), t1 - t0);
 
     uint64_t mask = (bits_total == 64) ? ~0ULL : ((1ULL << bits_total) - 1ULL);
+
+    /* If a hex public key is provided, solve that single point */
+    if (hex_pk) {
+        unsigned char pk_bytes[33];
+        size_t len = strlen(hex_pk);
+        if (len != 66) {
+            printf("Error: hex pubkey must be 66 hex chars (33 bytes compressed)\n");
+            goto done;
+        }
+        for (int i = 0; i < 33; i++) {
+            unsigned int byte;
+            if (sscanf(hex_pk + 2*i, "%02x", &byte) != 1) {
+                printf("Error: invalid hex in pubkey\n");
+                goto done;
+            }
+            pk_bytes[i] = (unsigned char)byte;
+        }
+        secp256k1_pubkey Pm;
+        if (!secp256k1_ec_pubkey_parse(ctx, &Pm, pk_bytes, 33)) {
+            printf("Error: failed to parse pubkey (not a valid secp256k1 point?)\n");
+            goto done;
+        }
+        printf("Input pubkey: %s\n", hex_pk);
+        double ts = now_seconds();
+        uint64_t recovered = 0;
+        int found = bsgs_solve_parallel(&solver, &Pm, threads, window, &recovered);
+        double te = now_seconds();
+        if (found)
+            printf("Solved: m = %"PRIu64" (0x%"PRIx64")\n", recovered, recovered);
+        else
+        printf("Not found in [0, 2^%d)\n", bits_total);
+        printf("Search time: %.6f sec (%.2f ms)\n", te - ts, (te - ts) * 1e3);
+        goto done;
+    }
+
+    /* If a fixed m is provided, use it for all trials */
     int ok = 0;
     double ts = now_seconds();
     for (int t = 0; t < trials; t++) {
-        uint64_t m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
-        m &= mask; if (m == 0) m = 1;
+        uint64_t m;
+        if (fixed_m > 0) {
+            m = fixed_m & mask;
+        } else {
+            m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+            m &= mask; if (m == 0) m = 1;
+        }
         unsigned char sc[32]; u64_to_scalar32_be(m, sc);
         secp256k1_pubkey Pm;
         if (!secp256k1_ec_pubkey_create(ctx, &Pm, sc)) { printf("create failed\n"); break; }
+
+        /* Print m*G as hex so user can verify externally */
+        if (fixed_m > 0) {
+            unsigned char ser[33]; size_t slen = 33;
+            secp256k1_ec_pubkey_serialize(ctx, ser, &slen, &Pm,
+                                          SECP256K1_EC_COMPRESSED);
+            printf("m    = %"PRIu64" (0x%"PRIx64")\n", m, m);
+            printf("m*G  = ");
+            for (int i = 0; i < 33; i++) printf("%02x", ser[i]);
+            printf("\n\n");
+        }
+
         uint64_t recovered = 0;
         if (bsgs_solve_parallel(&solver, &Pm, threads, window, &recovered) && recovered == m)
             ok++;
@@ -1039,23 +1120,35 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, int 
     printf("Average per solve: %.6f sec (%.2f ms)\n\n",
            total / trials, (total / trials) * 1e3);
 
+    done:
     bsgs_ctx_free(&solver);
     secp256k1_context_destroy(ctx);
 }
 
 int main(int argc, char** argv) {
-    int bits_total = 40, l1 = 18, trials = 1, threads = 1, window = 64;
+    int      bits_total = 40, l1 = 18, trials = 1, threads = 1, window = 64;
+    uint64_t fixed_m    = 0;
+    char*    hex_pk     = NULL;
+
     if (argc >= 2) bits_total = atoi(argv[1]);
     if (argc >= 3) l1         = atoi(argv[2]);
     if (argc >= 4) trials     = atoi(argv[3]);
     if (argc >= 5) threads    = atoi(argv[4]);
     if (argc >= 6) window     = atoi(argv[5]);
+    if (argc >= 7) {
+        /* argv[6]: either a decimal integer m or a 66-char hex pubkey */
+        if (strlen(argv[6]) == 66) {
+            hex_pk = argv[6];
+        } else {
+            fixed_m = (uint64_t)strtoull(argv[6], NULL, 10);
+        }
+    }
 
     /* Window must be a power of 2 >= 1 */
     if (window < 1) window = 1;
     { int w = 1; while (w < window) w <<= 1; window = w; }
 
     srand((unsigned)time(NULL));
-    benchmark_bsgs(bits_total, l1, trials, threads, window);
+    benchmark_bsgs(bits_total, l1, trials, threads, window, fixed_m, hex_pk);
     return 0;
 }

@@ -107,15 +107,13 @@ static int write_all(int fd, const void* buf, size_t len) {
 /* ─────────────────────── cuckoo table ───────────────────────────── */
 #define CUCKOO_K        3
 #define CUCKOO_STASH_SZ 16
-#define CUCKOO_SEED1    0x9e3779b97f4a7c15ULL
-#define CUCKOO_SEED2    0xd1b54a32d192ed03ULL
 #define BABY_MAGIC      0x4B43554B4F4F4355ULL
 
 typedef struct { uint32_t key; uint32_t val; } entry_packed;
 typedef struct {
     entry_packed* tab;
     size_t section_size, total_bins, size;
-    uint64_t stash_x64[CUCKOO_STASH_SZ];
+    unsigned char stash_xb[CUCKOO_STASH_SZ][32];
     uint32_t stash_val[CUCKOO_STASH_SZ];
     int stash_count;
 } cuckoo_map;
@@ -125,30 +123,30 @@ typedef struct {
     int32_t stash_count; uint32_t _pad;
 } baby_hdr;
 
-static uint64_t mix64(uint64_t x) {
-    x ^= x>>30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x>>27; x *= 0x94d049bb133111ebULL;
-    x ^= x>>31; return x;
+static inline uint32_t u32be(const unsigned char* b) {
+    return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|
+    ((uint32_t)b[2]<<8)|(uint32_t)b[3];
 }
-static size_t fastrange64(uint64_t h, size_t n) {
-    return (size_t)((__uint128_t)h*(__uint128_t)n>>64);
+static inline size_t cpos(int sec, const unsigned char xb[32], size_t s) {
+    uint32_t h = u32be(xb + sec * 8);
+    return (size_t)((__uint128_t)h * (__uint128_t)s >> 32) + (size_t)sec * s;
 }
-static size_t cpos(int sec, uint64_t x64, size_t s) {
-    uint64_t seed=(sec==0)?0ULL:(sec==1)?CUCKOO_SEED1:CUCKOO_SEED2;
-    return fastrange64(mix64(x64^seed),s)+(size_t)sec*s;
+static inline uint32_t ckey(int sec, const unsigned char xb[32]) {
+    return u32be(xb + sec * 8 + 4);
 }
-static int map_get_all(const cuckoo_map* m, uint64_t x64, uint32_t* out) {
-    uint32_t k=(uint32_t)(x64>>32); size_t s=m->section_size; int n=0;
+static int map_get_all(const cuckoo_map* m, const unsigned char xb[32], uint32_t* out) {
+    size_t s=m->section_size; int n=0;
     const entry_packed* e;
-    e=&m->tab[cpos(0,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    e=&m->tab[cpos(1,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    e=&m->tab[cpos(2,x64,s)]; if(e->val&&e->key==k) out[n++]=e->val;
-    for(int i=0;i<m->stash_count;i++) if(m->stash_x64[i]==x64) out[n++]=m->stash_val[i];
+    e=&m->tab[cpos(0,xb,s)]; if(e->val&&e->key==ckey(0,xb)) out[n++]=e->val;
+    e=&m->tab[cpos(1,xb,s)]; if(e->val&&e->key==ckey(1,xb)) out[n++]=e->val;
+    e=&m->tab[cpos(2,xb,s)]; if(e->val&&e->key==ckey(2,xb)) out[n++]=e->val;
+    for(int i=0;i<m->stash_count;i++)
+        if(memcmp(m->stash_xb[i],xb,32)==0) out[n++]=m->stash_val[i];
     return n;
 }
 static int load_baby_table(cuckoo_map* baby, int l1) {
     char fname[128];
-    snprintf(fname,sizeof(fname),"bsgs_baby_cuckoo_secp256k1_l1_%d.bin",l1);
+    snprintf(fname,sizeof(fname),"bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin",l1);
     int fd=open(fname,O_RDONLY); if(fd<0){perror(fname);return 0;}
     baby_hdr hdr;
     if(!read_all(fd,&hdr,sizeof(hdr))||hdr.magic!=BABY_MAGIC||
@@ -158,7 +156,7 @@ static int load_baby_table(cuckoo_map* baby, int l1) {
     baby->section_size=(size_t)hdr.section_size;
     baby->total_bins=CUCKOO_K*(size_t)hdr.section_size;
     baby->size=(size_t)hdr.used_count; baby->stash_count=(int)hdr.stash_count;
-    if(!read_all(fd,baby->stash_x64,sizeof(baby->stash_x64))||
+    if(!read_all(fd,baby->stash_xb,sizeof(baby->stash_xb))||
        !read_all(fd,baby->stash_val,sizeof(baby->stash_val))){close(fd);return 0;}
     baby->tab=(entry_packed*)calloc(baby->total_bins,sizeof(entry_packed));
     if(!baby->tab||!read_all(fd,baby->tab,baby->total_bins*sizeof(entry_packed))){
@@ -319,7 +317,7 @@ static secp256k1_fe* treemon(secp256k1_fe* denom, uint64_t n, int threads) {
 
     pthread_t* tids = (pthread_t*)malloc((size_t)threads * sizeof(pthread_t));
     treemon_worker_args* wargs = (treemon_worker_args*)malloc(
-            (size_t)threads * sizeof(treemon_worker_args));
+    (size_t)threads * sizeof(treemon_worker_args));
 
     /* ── Forward pass: bottom-up, level by level ── */
     uint64_t level_size = n / 2;      /* number of nodes at this level */
@@ -403,11 +401,9 @@ static void* search_worker(void* varg) {
              * Bug fix: look up Pm.x in baby table rather than calling
              * verify_candidate directly — the old code skipped the lookup
              * and only checked m=j*M, missing m=i cases. */
-            unsigned char buf[32]; secp256k1_fe_get_b32(buf, &a->Pm_x);
-            uint64_t x64=0;
-            for(int i=0;i<8;i++) x64=(x64<<8)|buf[i];
+            unsigned char xb[32]; secp256k1_fe_get_b32(xb, &a->Pm_x);
             uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
-            int nc=map_get_all(a->baby,x64,cands);
+            int nc=map_get_all(a->baby,xb,cands);
             for(int ci=0;ci<nc;ci++){
                 uint64_t m1=j*a->M+(uint64_t)cands[ci];
                 uint64_t m2=j*a->M-(uint64_t)cands[ci];
@@ -440,12 +436,9 @@ static void* search_worker(void* varg) {
         secp256k1_fe_add(&x3, &neg);
         secp256k1_fe_normalize_var(&x3);
 
-        unsigned char buf[32]; secp256k1_fe_get_b32(buf,&x3);
-        uint64_t x64=0;
-        for(int i=0;i<8;i++) x64=(x64<<8)|buf[i];
-
+        unsigned char xb[32]; secp256k1_fe_get_b32(xb,&x3);
         uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
-        int nc=map_get_all(a->baby,x64,cands);
+        int nc=map_get_all(a->baby,xb,cands);
         for(int ci=0;ci<nc;ci++){
             uint64_t m1=j*a->M+(uint64_t)cands[ci];
             uint64_t m2=j*a->M-(uint64_t)cands[ci];
@@ -537,12 +530,12 @@ static int fastecdlp_solve(const cuckoo_map* baby,
     }
     for (int t=0;t<threads;t++) pthread_join(tids[t],NULL);
 
-    int found=0;
+    int search_found=0;
     for (int t=0;t<threads;t++)
-        if(sargs[t].found){*out_m=sargs[t].result_m;found=1;break;}
+        if(sargs[t].found){*out_m=sargs[t].result_m;search_found=1;break;}
 
     free(tree); free(tids); free(sargs);
-    return found;
+    return search_found;
 }
 
 /* ─────────────────────── benchmark ─────────────────────────────── */
