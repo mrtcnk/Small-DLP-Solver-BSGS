@@ -30,6 +30,14 @@ Phase 2 uses a parallel binary product tree matching `BuildInvTree` with
 Both files include fixes for two edge cases: (i) zero denominator when
 $P_m = j \cdot M \cdot G$ (would cause division by zero in batch inversion),
 and (ii) correct baby table lookup when $T_2[j]$ is the point at infinity.
+All four implementations use Tang et al.'s window-based cuckoo hash (Section IV.C.2):
+the x-coordinate is split into three independent 8-byte windows, each contributing
+4 bytes for position and 4 bytes for fingerprint key, with no mixing function.
+Benchmarks show the window-based hash outperforms the `mix64` approach at smaller
+bit sizes (52/54-bit) due to simpler computation and better fingerprint independence,
+but `mix64` is faster at larger bit sizes (58/63-bit) where the 10.4 GB baby table
+exceeds L3 cache capacity and the scattered byte reads of the window hash incur
+additional cache miss penalties.
 
 ---
 
@@ -100,7 +108,30 @@ avoid false negatives caused by distinct x64 values sharing the same upper
 
 ---
 
-## Build
+## Quick Start
+
+The baby-step table (`bsgs_baby_cuckoo_secp256k1_l1_xx_window.bin`) is not
+included in the repository due to its size. It is built automatically on first
+run. For initial testing, use `l1=28` which requires ~2 GB RAM and builds in
+~15 minutes:
+
+```bash
+# Build the solver
+cc -O3 -Wall -Wextra -o bsgs bsgs_dlp_benchmark_cached.c \
+    -I/usr/local/include \
+    -I/path/to/secp256k1/src \
+    -L/usr/local/lib -lsecp256k1 -lpthread
+
+# Run with l1=28 (small table, good for testing)
+./bsgs 52 28 5 10 256
+```
+
+The same table is shared by all four implementations. Once built, all four
+can be tested without rebuilding. For production use, build with `l1=30`
+(~62 min, 5.3 GB) or `l1=31` (~5 hours, 10.4 GB).
+
+---
+
 
 Requires secp256k1 internal headers for Jacobian arithmetic:
 
@@ -176,19 +207,19 @@ precomputation are excluded. All results confirmed correct (N/N trials).
 
 | bits | l1 | FastECDLP (Tang et al.) | +Parallel Ph.1+2 | +Jacobian (§3.1) | This work (§3.1+§3.2) |
 |---|---|---|---|---|---|
-| 52 | 30 | 246 ms | **108 ms** | 207 ms | 213 ms (W=256) |
-| 54 | 30 | 758 ms | **382 ms** | 942 ms | 845 ms (W=512) |
-| 54 | 31 | 479 ms | 396 ms | 659 ms | **476 ms** (W=512) |
-| 58 | 31 | 61.6 sec† | 64.7 sec† | 122.7 sec† | **4.26 sec** |
-| 63 | 31 | infeasible | infeasible | infeasible | **164 sec** |
+| 52 | 30 | 199 ms | **77 ms** | 172 ms | 166 ms (W=256) |
+| 54 | 30 | 590 ms | **336 ms** | 730 ms | 768 ms (W=512) |
+| 54 | 31 | 486 ms | **314 ms** | 583 ms | **334 ms** (W=512) |
+| 58 | 31 | 61.6 sec† | 64.7 sec† | 122.7 sec† | **5.68 sec** |
+| 63 | 31 | infeasible | infeasible | infeasible | **194 sec** |
 
 † severe memory pressure (>21 GB total allocation on 32 GB machine); results from 5 trials with cached T₂, pending re-run
 
 **Key results:**
-- At 54-bit (l1=31): our solver (476 ms) outperforms Tang et al. (479 ms), **comparable speed** without any T₂ storage.
-- At 54-bit (l1=30): our parallel variant (382 ms) is **2× faster** than Tang et al. (758 ms).
-- At 58-bit: our solver is **~14.5× faster** than Tang et al. (4.26 sec vs 61.6 sec).
-- At 63-bit: our solver is the **only feasible approach** — FastECDLP's T₂ table would require 175 GB.
+- At 52-bit (l1=30): our parallel variant (77 ms) is **2.6× faster** than Tang et al. (199 ms).
+- At 54-bit (l1=31): our solver (334 ms) outperforms Tang et al. (486 ms), **1.45× faster** without any T₂ storage.
+- At 58-bit: our solver (5.68 sec) vs Tang et al. (61.6 sec), **~11× faster**.
+- At 63-bit: our solver (194 sec, 10 trials) is the **only feasible approach** — FastECDLP's T₂ table would require 175 GB.
 
 ### Window Size Sweep (54-bit, l1=30, 10 threads, 10 trials)
 
