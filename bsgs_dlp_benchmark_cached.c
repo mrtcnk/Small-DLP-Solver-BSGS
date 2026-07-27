@@ -7,7 +7,6 @@
 #include <errno.h>
 
 #include <secp256k1.h>
-
 /*
  * secp256k1 internal headers for Jacobian arithmetic.
  *
@@ -38,6 +37,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
+
+#define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 /* ---------------- timing ---------------- */
 
 static double now_seconds(void) {
@@ -163,35 +164,6 @@ static void ge_xb32(const secp256k1_ge* ge, unsigned char buf[32]) {
     secp256k1_fe x = ge->x;
     secp256k1_fe_normalize_var(&x);
     secp256k1_fe_get_b32(buf, &x);
-}
-
-/*
- * Check Jacobian point a == affine point b WITHOUT any inversion.
- *
- * a = (X:Y:Z) in Jacobian, b = (x,y) in affine.
- * Equal iff: X == x * Z^2  AND  Y == y * Z^3  (mod p)
- *
- * Cost: 1 sqr + 2 mul + 2 normalise + 2 compare.
- */
-static int gej_eq_ge(const secp256k1_gej* a, const secp256k1_ge* b) {
-    secp256k1_fe z2, z3, u, s, ax, ay;
-    if (a->infinity) return b->infinity;
-    if (b->infinity) return 0;
-
-    secp256k1_fe_sqr(&z2, &a->z);
-    secp256k1_fe_mul(&z3, &z2, &a->z);
-
-    secp256k1_fe_mul(&u, &b->x, &z2);
-    ax = a->x;
-    secp256k1_fe_normalize_var(&ax);
-    secp256k1_fe_normalize_var(&u);
-    if (!secp256k1_fe_equal_var(&ax, &u)) return 0;
-
-    secp256k1_fe_mul(&s, &b->y, &z3);
-    ay = a->y;
-    secp256k1_fe_normalize_var(&ay);
-    secp256k1_fe_normalize_var(&s);
-    return secp256k1_fe_equal_var(&ay, &s);
 }
 
 /* ================================================================
@@ -716,7 +688,7 @@ static int bsgs_solve(const bsgs_ctx* b,
 
     secp256k1_gej Qj;
     pubkey_to_gej(targetPm, &Qj);
-    secp256k1_gej_add_ge(&Qj, &Qj, &b->neg_MG_ge);
+    secp256k1_gej_add_ge_var(&Qj, &Qj, &b->neg_MG_ge, NULL);
 
     secp256k1_gej jMGj;
     secp256k1_gej_set_ge(&jMGj, &b->MG_ge);
@@ -736,12 +708,11 @@ static int bsgs_solve(const bsgs_ctx* b,
     while (j + (uint64_t)W <= b->J && !result) {
         int early = 0;
         for (size_t w = 0; w < W; w++) {
-            if (gej_eq_ge(&jMGj, &target_ge)) {
+            if (secp256k1_gej_is_infinity(&Qj)) {
                 *out_m = (j + (uint64_t)w) * b->M; result = 1; early = 1; break;
             }
             Q_win[w] = Qj; j_win[w] = j + (uint64_t)w;
-            secp256k1_gej_add_ge(&Qj,   &Qj,   &b->neg_MG_ge);
-            secp256k1_gej_add_ge(&jMGj, &jMGj, &b->MG_ge);
+            secp256k1_gej_add_ge_var(&Qj,   &Qj,   &b->neg_MG_ge, NULL);
         }
         if (early) break;
         j += (uint64_t)W;
@@ -768,7 +739,7 @@ static int bsgs_solve(const bsgs_ctx* b,
 
     /* Remaining steps (< W) — single inversion fallback */
     for (; j < b->J && !result; j++) {
-        if (gej_eq_ge(&jMGj, &target_ge)) { *out_m = j * b->M; result = 1; break; }
+        if (secp256k1_gej_is_infinity(&Qj))  { *out_m = j * b->M; result = 1; break; }
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
         unsigned char qxb[32];
@@ -782,8 +753,7 @@ static int bsgs_solve(const bsgs_ctx* b,
             else if (verify_candidate(ctx, m2, t33)) { *out_m = m2; result = 1; }
         }
         if (!result) {
-            secp256k1_gej_add_ge(&Qj,   &Qj,   &b->neg_MG_ge);
-            secp256k1_gej_add_ge(&jMGj, &jMGj, &b->MG_ge);
+            secp256k1_gej_add_ge_var(&Qj,   &Qj,   &b->neg_MG_ge, NULL);
         }
     }
 
@@ -842,7 +812,7 @@ static void* bsgs_worker_thread(void* argp) {
 
     secp256k1_gej Qj;
     pubkey_to_gej(&a->targetPm, &Qj);
-    secp256k1_gej_add_ge(&Qj, &Qj, &neg_jMG_ge);
+    secp256k1_gej_add_ge_var(&Qj, &Qj, &neg_jMG_ge, NULL);
 
     /* ---- windowed main loop ---- */
     while (j + (uint64_t)W <= a->j_end) {
@@ -850,7 +820,7 @@ static void* bsgs_worker_thread(void* argp) {
 
         int early = 0;
         for (size_t w = 0; w < W; w++) {
-            if (gej_eq_ge(&jMGj, &a->target_ge)) {
+            if (secp256k1_gej_is_infinity(&Qj)) {
                 uint64_t m = (j + (uint64_t)w) * b->M;
                 pthread_mutex_lock(a->found_mu);
                 if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
@@ -861,8 +831,7 @@ static void* bsgs_worker_thread(void* argp) {
                 early = 1; break;
             }
             Q_win[w] = Qj; j_win[w] = j + (uint64_t)w;
-            secp256k1_gej_add_ge(&Qj,   &Qj,   &b->neg_MG_ge);
-            secp256k1_gej_add_ge(&jMGj, &jMGj, &b->MG_ge);
+            secp256k1_gej_add_ge_var(&Qj,   &Qj,   &b->neg_MG_ge, NULL);
         }
         if (early) break;
         j += (uint64_t)W;
@@ -905,7 +874,7 @@ static void* bsgs_worker_thread(void* argp) {
     /* ---- remaining steps (< W) ---- */
     while (j < a->j_end &&
            !atomic_load_explicit(a->found, memory_order_relaxed)) {
-        if (gej_eq_ge(&jMGj, &a->target_ge)) {
+        if (secp256k1_gej_is_infinity(&Qj)) {
             uint64_t m = j * b->M;
             pthread_mutex_lock(a->found_mu);
             if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
@@ -939,8 +908,7 @@ static void* bsgs_worker_thread(void* argp) {
             }
         }
         if (got_it) break;
-        secp256k1_gej_add_ge(&Qj,   &Qj,   &b->neg_MG_ge);
-        secp256k1_gej_add_ge(&jMGj, &jMGj, &b->MG_ge);
+        secp256k1_gej_add_ge_var(&Qj,   &Qj,   &b->neg_MG_ge, NULL);
         j++;
     }
 
