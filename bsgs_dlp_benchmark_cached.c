@@ -549,7 +549,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
      * Pass 2: re-walk i*G, fill per-section keys into packed table.
      *         Also fill stash xb[] for exact stash matching.
      */
-    size_t n = (size_t)(b->Mhalf - 1);
+    size_t n = (size_t)(b->Mhalf);
     build_entry* btab = cuckoo_alloc_build(&b->baby, n);
     if (!btab) { fprintf(stderr, "cuckoo_alloc_build failed\n"); return 0; }
 
@@ -563,7 +563,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
     size_t s = b->baby.section_size;
 
     /* Pass 1: insert positions */
-    for (uint64_t i = 1; i < b->Mhalf; i++) {
+    for (uint64_t i = 1; i <= b->Mhalf; i++) {
         if (!pubkey_serialize33(ctx, &cur, ser)) {
             free(btab); map_free(&b->baby); return 0;
         }
@@ -576,7 +576,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
             free(btab); map_free(&b->baby); return 0;
         }
 
-        if (i + 1 < b->Mhalf) {
+        if (i + 1 <= b->Mhalf) {
             const secp256k1_pubkey* pts[2] = { &cur, &b->G };
             secp256k1_pubkey nxt;
             if (!secp256k1_ec_pubkey_combine(ctx, &nxt, pts, 2)) {
@@ -596,7 +596,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
 
     /* Pass 2: re-walk i*G, fill per-section keys into packed table */
     cur = b->G;
-    for (uint64_t i = 1; i < b->Mhalf; i++) {
+    for (uint64_t i = 1; i <= b->Mhalf; i++) {
         if (!pubkey_serialize33(ctx, &cur, ser)) {
             map_free(&b->baby); return 0;
         }
@@ -615,7 +615,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
             memcpy(b->baby.stash_xb[si], xb, 32);
         }
 
-        if (i + 1 < b->Mhalf) {
+        if (i + 1 <= b->Mhalf) {
             const secp256k1_pubkey* pts[2] = { &cur, &b->G };
             secp256k1_pubkey nxt;
             if (!secp256k1_ec_pubkey_combine(ctx, &nxt, pts, 2)) {
