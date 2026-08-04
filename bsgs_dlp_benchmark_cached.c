@@ -582,11 +582,11 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
      * Build cuckoo table.
      *
      * Phase 1: allocate 12-byte build_entry table (section_size computed
-     *          inside cuckoo_alloc_build from n = Mhalf-1).
-     * Phase 2: walk i*G for i in [1, Mhalf), insert each (x64, i).
+     *          inside cuckoo_alloc_build from n = Mhalf).
+     * Phase 2: walk i*G for i in [1, Mhalf], insert each (x64, i).
      * Phase 3: compact 12-byte → 8-byte, free build table.
      */
-    size_t n = (size_t)(b->Mhalf - 1);
+    size_t n = (size_t)(b->Mhalf);
     build_entry* btab = cuckoo_alloc_build(&b->baby, n);
     if (!btab) { fprintf(stderr, "cuckoo_alloc_build failed\n"); return 0; }
 
@@ -599,7 +599,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
     unsigned char ser[33];
     size_t s = b->baby.section_size;
 
-    for (uint64_t i = 1; i < b->Mhalf; i++) {
+    for (uint64_t i = 1; i <= b->Mhalf; i++) {
         if (!pubkey_serialize33(ctx, &cur, ser)) {
             free(btab); map_free(&b->baby); return 0;
         }
@@ -612,7 +612,7 @@ static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
             free(btab); map_free(&b->baby); return 0;
         }
 
-        if (i + 1 < b->Mhalf) {
+        if (i + 1 <= b->Mhalf) {
             const secp256k1_pubkey* pts[2] = { &cur, &b->G };
             secp256k1_pubkey nxt;
             if (!secp256k1_ec_pubkey_combine(ctx, &nxt, pts, 2)) {
