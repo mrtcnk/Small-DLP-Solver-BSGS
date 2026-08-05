@@ -356,28 +356,9 @@ static void* thread_fn(void* varg) {
     inv_den[0] = acc;
     free(prefix); free(denom);
 
-    secp256k1_fe x3;
-    uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
-    int nc;
     /* ── Phase 3: compute x(Pm - T2[j]) and look up ── */
     for (uint64_t k = 0; k < chunk && !atomic_load(a->found_flag); k++) {
         uint64_t j = a->j_start + k;
-
-        if (a->T2[j].infinity) {
-            unsigned char xb[32]; secp256k1_fe_get_b32(xb,&a->Pm_x);
-            nc=map_get_all(a->baby,xb,cands);
-            for(int ci=0;ci<nc;ci++){
-                int64_t m1=(uint64_t)cands[ci];
-                int64_t m2=-(uint64_t)cands[ci];
-                if(verify_candidate(a->ctx,m1,a->target33)){
-                    a->result_m=m1;a->found=1;
-                    atomic_store(a->found_flag,1);break;}
-                if(verify_candidate(a->ctx,m2,a->target33)){
-                    a->result_m=m2;a->found=1;
-                    atomic_store(a->found_flag,1);break;}
-            }
-            continue;
-        }
 
         secp256k1_fe tx = a->T2[j].x, ty = a->T2[j].y;
         secp256k1_fe_normalize_var(&tx);
@@ -439,6 +420,17 @@ static int fastecdlp_solve(const cuckoo_map* baby,
     secp256k1_fe Pm_x = Pm_ge->x; secp256k1_fe_normalize_var(&Pm_x);
     secp256k1_fe Pm_y = Pm_ge->y; secp256k1_fe_normalize_var(&Pm_y);
 
+    /* j=0: direct baby lookup for Pm = i.G */
+    unsigned char txb[32];
+    memcpy(txb, target33 + 1, 32); /* x-coordinate from compressed pubkey */
+    uint32_t cands[3 + CUCKOO_STASH_SZ];
+    int nc = map_get_all(baby, txb, cands);
+    for (int ci = 0; ci < nc; ci++) {
+        if (verify_candidate(ctx, (uint64_t)cands[ci], target33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
+    }
+
     pthread_t*   tids = (pthread_t*)  malloc((size_t)threads * sizeof(pthread_t));
     thread_args* args = (thread_args*)malloc((size_t)threads * sizeof(thread_args));
     atomic_int found_flag; atomic_init(&found_flag, 0);
@@ -450,9 +442,9 @@ static int fastecdlp_solve(const cuckoo_map* baby,
         args[t].Pm_x       = Pm_x;
         args[t].Pm_y       = Pm_y;
         args[t].M          = M;
-        args[t].j_start    = (uint64_t)t * chunk;
-        args[t].j_end      = (uint64_t)t * chunk + chunk < J
-                             ? (uint64_t)t * chunk + chunk : J;
+        args[t].j_start    = (uint64_t)t * chunk + 1;
+        args[t].j_end      = (uint64_t)t * chunk + 1 + chunk < J
+                             ? (uint64_t)t * chunk + 1 + chunk : J;
         args[t].target33   = target33;
         args[t].found_flag = &found_flag;
         args[t].result_m   = 0;
