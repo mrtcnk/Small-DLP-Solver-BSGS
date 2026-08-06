@@ -7,6 +7,7 @@
 #include <errno.h>
 
 #include <secp256k1.h>
+
 /*
  * secp256k1 internal headers for Jacobian arithmetic.
  *
@@ -36,7 +37,6 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
-
 
 #define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 /* ---------------- timing ---------------- */
@@ -671,16 +671,15 @@ static int bsgs_solve(const bsgs_ctx* b,
     unsigned char t33[33];
     if (!pubkey_serialize33(ctx, targetPm, t33)) return 0;
 
+    /* j=0: direct baby lookup for Pm = i.G */
     unsigned char txb[32];
     memcpy(txb, t33 + 1, 32); /* x-coordinate from compressed pubkey */
-
-    {
-        uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, txb, cands);
-        for (int ci = 0; ci < nc; ci++)
-            if (verify_candidate(ctx, (uint64_t)cands[ci], t33)) {
-                *out_m = (uint64_t)cands[ci]; return 1;
-            }
+    uint32_t cands[3 + CUCKOO_STASH_SZ];
+    int nc = map_get_all(&b->baby, txb, cands);
+    for (int ci = 0; ci < nc; ci++) {
+        if (verify_candidate(ctx, (uint64_t)cands[ci], t33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
     }
 
     secp256k1_ge target_ge;
@@ -739,7 +738,7 @@ static int bsgs_solve(const bsgs_ctx* b,
 
     /* Remaining steps (< W) — single inversion fallback */
     for (; j < b->J && !result; j++) {
-        if (secp256k1_gej_is_infinity(&Qj))  { *out_m = j * b->M; result = 1; break; }
+        if (secp256k1_gej_is_infinity(&Qj)) { *out_m = j * b->M; result = 1; break; }
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
         unsigned char qxb[32];
@@ -919,33 +918,30 @@ static void* bsgs_worker_thread(void* argp) {
 
 static int bsgs_solve_parallel(const bsgs_ctx* b,
                                const secp256k1_pubkey* targetPm,
-                               int nthreads, int window,
+                               int threads, int window,
                                uint64_t* out_m) {
-    if (nthreads < 1) nthreads = 1;
-    if (nthreads == 1) return bsgs_solve(b, targetPm, window, out_m);
+    if (threads < 1) threads = 1;
+    if (threads == 1) return bsgs_solve(b, targetPm, window, out_m);
 
     const secp256k1_context* ctx0 = b->ctx;
     unsigned char t33[33];
     if (!pubkey_serialize33(ctx0, targetPm, t33)) return 0;
 
-    /* j=0: direct baby lookup */
+    /* j=0: direct baby lookup for Pm = i.G */
     unsigned char txb[32];
     memcpy(txb, t33 + 1, 32); /* x-coordinate from compressed pubkey */
-    {
-        uint32_t cands[3 + CUCKOO_STASH_SZ];
-        int nc = map_get_all(&b->baby, txb, cands);
-        for (int ci = 0; ci < nc; ci++)
-            if (verify_candidate(ctx0, (uint64_t)cands[ci], t33)) {
-                *out_m = (uint64_t)cands[ci]; return 1;
-            }
+    uint32_t cands[3 + CUCKOO_STASH_SZ];
+    int nc = map_get_all(&b->baby, txb, cands);
+    for (int ci = 0; ci < nc; ci++){
+        if (verify_candidate(ctx0, (uint64_t)cands[ci], t33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
     }
-
+    
     uint64_t J = b->J;
-    if (J <= 1) return 0;
-    if ((uint64_t)nthreads > (J - 1)) nthreads = (int)(J - 1);
-
-    pthread_t*        tids = (pthread_t*)       calloc((size_t)nthreads, sizeof(pthread_t));
-    bsgs_worker_args* args = (bsgs_worker_args*)calloc((size_t)nthreads, sizeof(bsgs_worker_args));
+    uint64_t chunk = (J + (uint64_t)threads - 1)/(uint64_t)threads;
+    pthread_t*        tids = (pthread_t*)       calloc((size_t)threads, sizeof(pthread_t));
+    bsgs_worker_args* args = (bsgs_worker_args*)calloc((size_t)threads, sizeof(bsgs_worker_args));
     if (!tids || !args) { free(tids); free(args); return 0; }
 
     atomic_int      found   = 0;
@@ -955,29 +951,25 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
 
     secp256k1_ge target_ge;
     pubkey_to_ge(targetPm, &target_ge);
-
-    uint64_t total = J - 1;
-    uint64_t chunk = total / (uint64_t)nthreads;
-    uint64_t rem   = total % (uint64_t)nthreads;
-    uint64_t jcur  = 1;
-
-    for (int t = 0; t < nthreads; t++) {
-        uint64_t take = chunk + (t < (int)rem ? 1 : 0);
+    
+    uint64_t jcur = 1;
+    for (int t = 0; t < threads; t++) {
         args[t].b         = b;
         args[t].targetPm  = *targetPm;
         memcpy(args[t].target33, t33, 33);
         args[t].target_ge = target_ge;
         args[t].j_start   = jcur;
-        args[t].j_end     = jcur + take;
+        args[t].j_end     = jcur + chunk < J + 1 ?
+                            jcur + chunk : J + 1 ; /* j_end is not included */
         args[t].window    = window;
         args[t].found     = &found;
         args[t].found_m   = &found_m;
         args[t].found_mu  = &found_mu;
-        jcur += take;
         pthread_create(&tids[t], NULL, bsgs_worker_thread, &args[t]);
+        jcur += chunk;
     }
 
-    for (int t = 0; t < nthreads; t++) pthread_join(tids[t], NULL);
+    for (int t = 0; t < threads; t++) pthread_join(tids[t], NULL);
 
     int ok = atomic_load_explicit(&found, memory_order_relaxed);
     if (ok) *out_m = found_m;

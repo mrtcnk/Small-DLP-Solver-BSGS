@@ -208,8 +208,8 @@ static secp256k1_ge* build_t2(const secp256k1_context* ctx,
     double t0 = now_seconds();
     secp256k1_gej acc; secp256k1_gej_set_infinity(&acc);
     for (uint64_t j = 0; j < J; j++) {
-        jac[j] = acc;
         secp256k1_gej_add_ge(&acc, &acc, &MG_ge);
+        jac[j] = acc;
     }
 
     /* Step 3: batch normalize all J Jacobian points to affine */
@@ -320,7 +320,7 @@ static void* thread_fn(void* varg) {
     /* ── Phase 1: compute denominators denom[k] = Pm.x - T2[j].x ── */
     for (uint64_t k = 0; k < chunk; k++) {
         uint64_t j = a->j_start + k;
-        secp256k1_fe tx=a->T2[j].x;
+        secp256k1_fe tx=a->T2[j-1].x;
         secp256k1_fe_normalize_var(&tx);
         secp256k1_fe_negate(&denom[k],&tx,1);
         secp256k1_fe_add(&denom[k],&a->Pm_x);
@@ -360,7 +360,7 @@ static void* thread_fn(void* varg) {
     for (uint64_t k = 0; k < chunk && !atomic_load(a->found_flag); k++) {
         uint64_t j = a->j_start + k;
 
-        secp256k1_fe tx = a->T2[j].x, ty = a->T2[j].y;
+        secp256k1_fe tx = a->T2[j-1].x, ty = a->T2[j-1].y;
         secp256k1_fe_normalize_var(&tx);
         secp256k1_fe_normalize_var(&ty);
 
@@ -415,7 +415,6 @@ static int fastecdlp_solve(const cuckoo_map* baby,
                            const unsigned char target33[33],
                            uint64_t* out_m) {
     uint64_t J     = 1ULL << l2;
-    uint64_t chunk = (J + (uint64_t)threads - 1) / (uint64_t)threads;
 
     secp256k1_fe Pm_x = Pm_ge->x; secp256k1_fe_normalize_var(&Pm_x);
     secp256k1_fe Pm_y = Pm_ge->y; secp256k1_fe_normalize_var(&Pm_y);
@@ -431,10 +430,12 @@ static int fastecdlp_solve(const cuckoo_map* baby,
         }
     }
 
+    uint64_t chunk = (J + (uint64_t)threads - 1)/(uint64_t)threads;
     pthread_t*   tids = (pthread_t*)  malloc((size_t)threads * sizeof(pthread_t));
     thread_args* args = (thread_args*)malloc((size_t)threads * sizeof(thread_args));
     atomic_int found_flag; atomic_init(&found_flag, 0);
 
+    uint64_t jcur = 1;
     for (int t = 0; t < threads; t++) {
         args[t].baby       = baby;
         args[t].ctx        = ctx;
@@ -442,14 +443,15 @@ static int fastecdlp_solve(const cuckoo_map* baby,
         args[t].Pm_x       = Pm_x;
         args[t].Pm_y       = Pm_y;
         args[t].M          = M;
-        args[t].j_start    = (uint64_t)t * chunk + 1;
-        args[t].j_end      = (uint64_t)t * chunk + 1 + chunk < J
-                             ? (uint64_t)t * chunk + 1 + chunk : J;
+        args[t].j_start    = jcur;
+        args[t].j_end      = jcur + chunk < J + 1 ?
+                             jcur + chunk : J + 1 ; /* j_end is not included */
         args[t].target33   = target33;
         args[t].found_flag = &found_flag;
         args[t].result_m   = 0;
         args[t].found      = 0;
         pthread_create(&tids[t], NULL, thread_fn, &args[t]);
+        jcur += chunk;
     }
 
     for (int t = 0; t < threads; t++) pthread_join(tids[t], NULL);
