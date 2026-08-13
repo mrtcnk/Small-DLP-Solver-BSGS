@@ -182,8 +182,8 @@ static secp256k1_ge* build_t2(const secp256k1_context* ctx,
     double t0=now_seconds();
     secp256k1_gej acc; secp256k1_gej_set_infinity(&acc);
     for(uint64_t j=0;j<J;j++){
-        jac[j]=acc;
         secp256k1_gej_add_ge(&acc,&acc,&MG_ge);
+        jac[j]=acc;
     }
     secp256k1_ge* T2=(secp256k1_ge*)malloc(J*sizeof(secp256k1_ge));
     if(!T2){free(jac);fprintf(stderr,"OOM: T2 affine\n");return NULL;}
@@ -396,36 +396,15 @@ static void* search_worker(void* varg) {
     for (uint64_t j = a->j_start;
          j < a->j_end && !atomic_load(a->found_flag); j++) {
 
-        if (a->T2[j].infinity) {
-            /* T2[j] = j*M*G = O (point at infinity) means Pm - O = Pm = i*G
-             * Bug fix: look up Pm.x in baby table rather than calling
-             * verify_candidate directly — the old code skipped the lookup
-             * and only checked m=j*M, missing m=i cases. */
-            unsigned char xb[32]; secp256k1_fe_get_b32(xb, &a->Pm_x);
-            uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
-            int nc=map_get_all(a->baby,xb,cands);
-            for(int ci=0;ci<nc;ci++){
-                uint64_t m1=j*a->M+(uint64_t)cands[ci];
-                uint64_t m2=j*a->M-(uint64_t)cands[ci];
-                if(verify_candidate(a->ctx,m1,a->target33)){
-                    a->result_m=m1;a->found=1;
-                    atomic_store(a->found_flag,1);break;}
-                if(verify_candidate(a->ctx,m2,a->target33)){
-                    a->result_m=m2;a->found=1;
-                    atomic_store(a->found_flag,1);break;}
-            }
-            continue;
-        }
-
-        secp256k1_fe tx = a->T2[j].x, ty = a->T2[j].y;
+        secp256k1_fe tx = a->T2[j-1].x, ty = a->T2[j-1].y;
         secp256k1_fe_normalize_var(&tx);
         secp256k1_fe_normalize_var(&ty);
 
         secp256k1_fe num = a->Pm_y;
         secp256k1_fe_add(&num, &ty);
         secp256k1_fe lam;
-        /* leaf index in tree = n-1+j */
-        secp256k1_fe_mul(&lam, &num, &a->inv_den[a->n - 1 + j]);
+        /* leaf index in tree array = n-1+(j-1) */
+        secp256k1_fe_mul(&lam, &num, &a->inv_den[a->n + j - 2]);
 
         secp256k1_fe lam2, x3, neg;
         secp256k1_fe_sqr(&lam2, &lam);
@@ -466,6 +445,17 @@ static int fastecdlp_solve(const cuckoo_map* baby,
     secp256k1_fe Pm_x=Pm_ge->x; secp256k1_fe_normalize_var(&Pm_x);
     secp256k1_fe Pm_y=Pm_ge->y; secp256k1_fe_normalize_var(&Pm_y);
 
+    /* j=0: direct baby lookup for Pm = i.G */
+    unsigned char txb[32];
+    memcpy(txb, target33 + 1, 32); /* x-coordinate from compressed pubkey */
+    uint32_t cands[3 + CUCKOO_STASH_SZ];
+    int nc = map_get_all(baby, txb, cands);
+    for (int ci = 0; ci < nc; ci++) {
+        if (verify_candidate(ctx, (uint64_t)cands[ci], target33)) {
+            *out_m = (uint64_t)cands[ci]; return 1;
+        }
+    }
+
     /* ── Phase 1: sequential denom computation (matches Tang et al. C++ source)
      * BuildZAndTryZeroDiff in ahesm2.cc is a plain sequential loop.
      * Only Phase 2 (TreeMon) and Phase 3 (search) are parallelised.
@@ -476,23 +466,19 @@ static int fastecdlp_solve(const cuckoo_map* baby,
     if (!denom) { fprintf(stderr,"OOM: denom\n"); return 0; }
 
     int found = 0;
-    for (uint64_t j = 0; j < J; j++) {
-        if (T2[j].infinity) {
-            secp256k1_fe_set_int(&denom[j], 1);
-        } else {
-            secp256k1_fe tx = T2[j].x;
-            secp256k1_fe_normalize_var(&tx);
-            secp256k1_fe_negate(&denom[j], &tx, 1);
-            secp256k1_fe_add(&denom[j], &Pm_x);
-            secp256k1_fe_normalize_var(&denom[j]);
-            if (secp256k1_fe_is_zero(&denom[j])) {
-                /* Pm = ±j*M*G — handle without batch inversion */
-                if (verify_candidate(ctx, j*M, target33)) {
-                    *out_m = j*M; found = 1; break;
-                }
-                if (verify_candidate(ctx, (uint64_t)(-(int64_t)(j*M)), target33)) {
-                    *out_m = (uint64_t)(-(int64_t)(j*M)); found = 1; break;
-                }
+    for (uint64_t j = 1; j <= J; j++) {
+        secp256k1_fe tx = T2[j-1].x;
+        secp256k1_fe_normalize_var(&tx);
+        secp256k1_fe_negate(&denom[j-1], &tx, 1);
+        secp256k1_fe_add(&denom[j-1], &Pm_x);
+        secp256k1_fe_normalize_var(&denom[j-1]);
+        if (secp256k1_fe_is_zero(&denom[j-1])) {
+            /* Pm = ±j*M*G — handle without batch inversion */
+            if (verify_candidate(ctx, j*M, target33)) {
+                *out_m = j*M; found = 1; break;
+            }
+            if (verify_candidate(ctx, (uint64_t)(-(int64_t)(j*M)), target33)) {
+                *out_m = (uint64_t)(-(int64_t)(j*M)); found = 1; break;
             }
         }
     }
@@ -502,14 +488,15 @@ static int fastecdlp_solve(const cuckoo_map* baby,
     secp256k1_fe* tree = treemon(denom, J, threads);
     free(denom);
     if (!tree) return 0;
-    /* tree[J-1+j] = denom[j]^{-1} */
+    /* tree[J-1+j-1] = denom[j-1]^{-1} */
 
     /* ── Phase 3: parallel search ── */
-    uint64_t chunk = (J+(uint64_t)threads-1)/(uint64_t)threads;
+    uint64_t chunk = (J + (uint64_t)threads - 1)/(uint64_t)threads;
     pthread_t*   tids  = (pthread_t*)  malloc((size_t)threads*sizeof(pthread_t));
     search_args* sargs = (search_args*)malloc((size_t)threads*sizeof(search_args));
     atomic_int found_flag; atomic_init(&found_flag,0);
 
+    uint64_t jcur = 1;
     for (int t=0;t<threads;t++) {
         sargs[t].baby       = baby;
         sargs[t].ctx        = ctx;
@@ -519,14 +506,15 @@ static int fastecdlp_solve(const cuckoo_map* baby,
         sargs[t].Pm_x       = Pm_x;
         sargs[t].Pm_y       = Pm_y;
         sargs[t].M          = M;
-        sargs[t].j_start    = (uint64_t)t*chunk;
-        sargs[t].j_end      = (uint64_t)t*chunk+chunk<J
-                              ? (uint64_t)t*chunk+chunk : J;
+        sargs[t].j_start    = jcur;
+        sargs[t].j_end      = jcur + chunk < J + 1 ?
+                              jcur + chunk : J + 1 ; /* j_end is not included */
         sargs[t].target33   = target33;
         sargs[t].found_flag = &found_flag;
         sargs[t].result_m   = 0;
         sargs[t].found      = 0;
         pthread_create(&tids[t],NULL,search_worker,&sargs[t]);
+        jcur += chunk;
     }
     for (int t=0;t<threads;t++) pthread_join(tids[t],NULL);
 

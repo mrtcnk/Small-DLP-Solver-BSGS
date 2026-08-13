@@ -296,12 +296,11 @@ static int fastecdlp_solve_parallel(
         const secp256k1_context* ctx,
         const secp256k1_ge* Pm_ge,
         const secp256k1_ge* neg_MG_ge,
-        const secp256k1_ge* MG_ge,
         uint64_t M, int l2, int threads,
         const unsigned char target33[33],
         uint64_t* out_m) {
 
-    uint64_t J     = 1ULL << l2;
+    uint64_t J     = (1ULL << l2) + 1;
     uint64_t chunk = (J + (uint64_t)threads - 1) / (uint64_t)threads;
 
     pthread_t*    tids = (pthread_t*)   malloc((size_t)threads * sizeof(pthread_t));
@@ -425,7 +424,7 @@ static void benchmark(int bits, int l1, int trials, int threads) {
         secp256k1_ec_pubkey_serialize(ctx, t33, &tlen, &Pm, SECP256K1_EC_COMPRESSED);
 
         uint64_t recovered = 0;
-        if (fastecdlp_solve_parallel(&baby, ctx, &Pm_ge, &neg_MG_ge, &MG_ge,
+        if (fastecdlp_solve_parallel(&baby, ctx, &Pm_ge, &neg_MG_ge,
                                      M, l2, threads, t33, &recovered)
             && recovered == m)
             ok++;
