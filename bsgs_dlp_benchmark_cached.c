@@ -737,7 +737,7 @@ static int bsgs_solve(const bsgs_ctx* b,
     }
 
     /* Remaining steps (< W) — single inversion fallback */
-    for (; j < b->J && !result; j++) {
+    for (; j <= b->J && !result; j++) {   /* include j = J: covers m = J*M - i (top of range) */
         if (secp256k1_gej_is_infinity(&Qj)) { *out_m = j * b->M; result = 1; break; }
         secp256k1_ge Q_ge;
         secp256k1_ge_set_gej(&Q_ge, &Qj);
