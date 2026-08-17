@@ -15,7 +15,7 @@
  *   + Jacobian (§3.1):      No T2, per-solve = J Jacobian additions + 1 full batch inv
  *   + Windowed  (§3.2):     No T2, per-solve = J Jacobian additions + J/W batch inv
  *
- * T2 memory: 2^l2 * sizeof(secp256k1_ge) bytes
+ * T2 memory: 2^(l2-1) * sizeof(secp256k1_ge) bytes
  *   l2=22 (52-bit): ~1.1 GB     l2=24 (54-bit): ~4.3 GB
  *
  * T2 cache file: fastecdlp_t2_secp256k1_l1_<l1>.bin
@@ -47,11 +47,11 @@
 #include "group.h"
 #include "group_impl.h"
 
+#include <errno.h>
+
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-
-#define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 
 /* ─────────────────────── timing ─────────────────────────────────── */
 static double now_seconds(void) {
@@ -63,10 +63,52 @@ static double now_seconds(void) {
 /* ─────────────────────── helpers ─────────────────────────────────── */
 static void u64_to_scalar32_be(uint64_t x, unsigned char out32[32]) {
     memset(out32, 0, 32);
-    for (int i = 0; i < 8; i++) { out32[31-i] = (unsigned char)(x & 0xFF); x >>= 8; }
+    for (int i = 0; i < 8; i++) { out32[31-i]=(unsigned char)(x&0xFF); x>>=8; }
 }
 
-static void pubkey_to_ge(const secp256k1_pubkey* pk, secp256k1_ge* ge) {
+int file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+/* ================================================================
+ * Jacobian helpers using secp256k1 internal types
+ * ================================================================
+ *
+ * Core idea:
+ *   secp256k1_gej_add_ge(&r, &a, &b)  -- Jacobian + affine, NO inversion
+ *   secp256k1_ge_set_gej(&r, &a)      -- Jacobian -> affine, ONE inversion
+ *                                         also normalises a in-place (z->1)
+ *
+ * Per-step inversion reduction:
+ *   Previous:  pubkey_combine(Q)   -> 1 inv
+ *              pubkey_combine(jMG) -> 1 inv
+ *              serialize(Q)        -> 0 (already affine)
+ *              serialize(jMG)      -> 0 (already affine)
+ *              Total: 2 inv/step   (+ 1 inv/step above was wrong — total was 2)
+ *
+ *   This version:
+ *              gej_add_ge(Qj)      -> 0 inv  (Jacobian add)
+ *              gej_add_ge(jMGj)    -> 0 inv  (Jacobian add)
+ *              ge_set_gej(Qj)      -> 1 inv  (x-coord for lookup, unavoidable)
+ *              gej_eq_ge(jMGj)     -> 0 inv  (2 mults)
+ *              Total: 1 inv/step   (~2x speedup on the loop)
+ */
+
+
+int pubkey_serialize33(const secp256k1_context* ctx,
+                              const secp256k1_pubkey* pk,
+                              unsigned char out33[33]) {
+    size_t outlen = 33;
+    if (!secp256k1_ec_pubkey_serialize(ctx, out33, &outlen, pk,
+                                       SECP256K1_EC_COMPRESSED))
+        return 0;
+    return outlen == 33;
+} 
+
+/* Load secp256k1_pubkey into affine secp256k1_ge.
+ * Mirrors libsecp256k1's internal pubkey_load() exactly. */
+void pubkey_to_ge(const secp256k1_pubkey* pk, secp256k1_ge* ge) {
     if (sizeof(secp256k1_ge_storage) == 64) {
         secp256k1_ge_storage s;
         memcpy(&s, &pk->data[0], sizeof(s));
@@ -79,122 +121,271 @@ static void pubkey_to_ge(const secp256k1_pubkey* pk, secp256k1_ge* ge) {
     }
 }
 
-static int verify_candidate(const secp256k1_context* ctx,
-                            uint64_t m_cand,
-                            const unsigned char target33[33]) {
-    if (m_cand == 0) return 0;
-    unsigned char sc[32]; u64_to_scalar32_be(m_cand, sc);
-    secp256k1_pubkey pk;
-    if (!secp256k1_ec_pubkey_create(ctx, &pk, sc)) return 0;
-    unsigned char got[33]; size_t glen = 33;
-    secp256k1_ec_pubkey_serialize(ctx, got, &glen, &pk, SECP256K1_EC_COMPRESSED);
-    return memcmp(got, target33, 33) == 0;
+/* Negate an affine point in-place (flip y). */
+void ge_negate(secp256k1_ge* out, const secp256k1_ge* in) {
+    *out = *in;
+    secp256k1_fe_negate(&out->y, &out->y, 1);
+    secp256k1_fe_normalize_var(&out->y);
 }
 
-/* ─────────────────────── I/O ─────────────────────────────────────── */
-static int read_all(int fd, void* buf, size_t len) {
-    unsigned char* p = (unsigned char*)buf;
-    while (len > 0) {
-        size_t chunk = len < (1ULL<<30) ? len : (1ULL<<30);
-        ssize_t n = read(fd, p, chunk);
-        if (n <= 0) return 0;
-        p += n; len -= (size_t)n;
+
+/* Adapted from the original verify_candidate function for signed m_cand */
+int verify_candidate(const secp256k1_context* ctx,
+                            int64_t m_cand,
+                            const unsigned char target33[33]) {
+    if(m_cand == 0) return 0;
+    if(m_cand < 0) {
+        // Handle negative candidate by computing -m_cand * G
+        unsigned char sc[32];
+        u64_to_scalar32_be((uint64_t)(-m_cand), sc);
+        secp256k1_pubkey pk;
+        if (!secp256k1_ec_pubkey_create(ctx, &pk, sc)) return 0;
+        secp256k1_ec_pubkey_negate(ctx, &pk); // Negate the public key
+        unsigned char got[33]; size_t glen = 33;
+        secp256k1_ec_pubkey_serialize(ctx, got, &glen, &pk, SECP256K1_EC_COMPRESSED);
+        return memcmp(got, target33, 33) == 0;
+    } else {
+        unsigned char sc[32]; u64_to_scalar32_be(m_cand, sc);
+        secp256k1_pubkey pk;
+        if (!secp256k1_ec_pubkey_create(ctx, &pk, sc)) return 0;
+        unsigned char c33[33];
+        if (!pubkey_serialize33(ctx, &pk, c33)) return 0;
+        return memcmp(c33, target33, 33) == 0;
     }
-    return 1;
 }
+
+
+
+/* Chunked write/read to work around 2 GB single-call limit on macOS */
 static int write_all(int fd, const void* buf, size_t len) {
     const unsigned char* p = (const unsigned char*)buf;
     while (len > 0) {
-        size_t chunk = len < (1ULL<<30) ? len : (1ULL<<30);
-        ssize_t n = write(fd, p, chunk);
-        if (n <= 0) return 0;
-        p += n; len -= (size_t)n;
+        size_t  chunk = len < (1ULL << 30) ? len : (1ULL << 30);
+        ssize_t n     = write(fd, p, chunk);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            perror("write_all");
+            return 0;
+        }
+        p   += (size_t)n;
+        len -= (size_t)n;
     }
     return 1;
 }
 
+int read_all(int fd, void* buf, size_t len) {
+    unsigned char* p = (unsigned char*)buf;
+    while (len > 0) {
+        size_t  chunk = len < (1ULL << 30) ? len : (1ULL << 30);
+        ssize_t n     = read(fd, p, chunk);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return 0;
+        }
+        if (n == 0) return 0;
+        p   += (size_t)n;
+        len -= (size_t)n;
+    }
+    return 1;
+}
+
+/* -------- Cuckoo helpers -------- */
 /* ─────────────────────── cuckoo table ───────────────────────────── */
+
 #define CUCKOO_K        3
 #define CUCKOO_STASH_SZ 16
+
 #define BABY_MAGIC      0x4B43554B4F4F4355ULL
 
-typedef struct { uint32_t key; uint32_t val; } entry_packed;
+/* ---- types ---- */
+
+/* 8-byte lookup entry — kept in memory after build */
 typedef struct {
-    entry_packed* tab;
-    size_t section_size, total_bins, size;
+    uint32_t key;   /* per-section 4-byte window key — discriminator */
+    uint32_t val;   /* i value; 0 = empty                            */
+} entry_packed;
+
+/* 12-byte build entry — used during cuckoo construction only.
+ * Stores only precomputed positions (for eviction rehashing) and val.
+ * Keys are NOT stored here — they are filled in a second pass after
+ * compaction by re-walking the i*G points. This keeps build memory
+ * at 12 bytes/entry matching the original implementation. */
+typedef struct {
+    uint32_t pos[3];  /* precomputed position within each section (offset from section base) */
+    uint32_t val;     /* i value; 0 = empty */
+} build_entry;
+
+/* cuckoo map (lookup phase, after compaction) */
+typedef struct {
+    entry_packed* tab;          /* 3 × section_size entries        */
+    size_t        section_size; /* bins per section (not pow2)     */
+    size_t        total_bins;   /* 3 × section_size                */
+    size_t        size;         /* entries successfully inserted    */
+    /* overflow stash (rare: ~0 entries with load 1.3×, k=3) */
     unsigned char stash_xb[CUCKOO_STASH_SZ][32];
     uint32_t stash_val[CUCKOO_STASH_SZ];
-    int stash_count;
+    int      stash_count;
 } cuckoo_map;
+
 typedef struct {
     uint64_t magic; uint32_t version, l1;
     uint64_t section_size, used_count;
     int32_t stash_count; uint32_t _pad;
 } baby_hdr;
 
+typedef struct {
+    secp256k1_context* ctx;
+    int bits_total, l1;
+    uint64_t M, J;
+    secp256k1_ge MG_ge;
+    secp256k1_ge neg_MG_ge;
+    cuckoo_map baby;   /* ← cuckoo hash table */
+} bsgs_ctx;
+
+static void map_free(cuckoo_map* m) {
+    free(m->tab);
+    memset(m, 0, sizeof(*m));
+}
+
+
+static void bsgs_ctx_free(bsgs_ctx* b) {
+    map_free(&b->baby); memset(b, 0, sizeof(*b));
+}
+
 static inline uint32_t u32be(const unsigned char* b) {
     return ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|
     ((uint32_t)b[2]<<8)|(uint32_t)b[3];
 }
+
+/* Position within section for (section, xb) */
 static inline size_t cpos(int sec, const unsigned char xb[32], size_t s) {
     uint32_t h = u32be(xb + sec * 8);
     return (size_t)((__uint128_t)h * (__uint128_t)s >> 32) + (size_t)sec * s;
 }
+
+/* Per-section fingerprint key */
 static inline uint32_t ckey(int sec, const unsigned char xb[32]) {
     return u32be(xb + sec * 8 + 4);
 }
-static int map_get_all(const cuckoo_map* m, const unsigned char xb[32], uint32_t* out) {
-    size_t s=m->section_size; int n=0;
-    const entry_packed* e;
-    e=&m->tab[cpos(0,xb,s)]; if(e->val&&e->key==ckey(0,xb)) out[n++]=e->val;
-    e=&m->tab[cpos(1,xb,s)]; if(e->val&&e->key==ckey(1,xb)) out[n++]=e->val;
-    e=&m->tab[cpos(2,xb,s)]; if(e->val&&e->key==ckey(2,xb)) out[n++]=e->val;
-    for(int i=0;i<m->stash_count;i++)
-        if(memcmp(m->stash_xb[i],xb,32)==0) out[n++]=m->stash_val[i];
-    return n;
+
+
+static void baby_cache_path(char* out, size_t outlen, int l1) {
+    snprintf(out, outlen, "bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin", l1);
 }
-static int load_baby_table(cuckoo_map* baby, int l1) {
-    char fname[128];
-    snprintf(fname,sizeof(fname),"bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin",l1);
-    int fd=open(fname,O_RDONLY); if(fd<0){perror(fname);return 0;}
+
+
+static int baby_load(const char* path, int expected_l1, cuckoo_map* baby_out) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+
     baby_hdr hdr;
-    if(!read_all(fd,&hdr,sizeof(hdr))||hdr.magic!=BABY_MAGIC||
-       hdr.version!=4||(int)hdr.l1!=l1){fprintf(stderr,"Bad header %s\n",fname);close(fd);return 0;}
-    memset(baby,0,sizeof(*baby));
-    baby->section_size=(size_t)hdr.section_size;
-    baby->total_bins=CUCKOO_K*(size_t)hdr.section_size;
-    baby->size=(size_t)hdr.used_count; baby->stash_count=(int)hdr.stash_count;
-    if(!read_all(fd,baby->stash_xb,sizeof(baby->stash_xb))||
-       !read_all(fd,baby->stash_val,sizeof(baby->stash_val))){close(fd);return 0;}
-    baby->tab=(entry_packed*)calloc(baby->total_bins,sizeof(entry_packed));
-    if(!baby->tab||!read_all(fd,baby->tab,baby->total_bins*sizeof(entry_packed))){
-        free(baby->tab);close(fd);return 0;}
-    close(fd);
-    printf("Baby table: %s (section=%zu, total=%zu, stash=%d, %.2f MB)\n",
-           fname,baby->section_size,baby->total_bins,baby->stash_count,
-           (double)(baby->total_bins*sizeof(entry_packed))/(1<<20));
+    if (!read_all(fd, &hdr, sizeof(hdr))) { close(fd); return 0; }
+
+    if (hdr.magic   != BABY_MAGIC ||
+        hdr.version != 4          ||
+        (int)hdr.l1 != expected_l1 ||
+        hdr.section_size == 0) { close(fd); return 0; }
+
+    memset(baby_out, 0, sizeof(*baby_out));
+    baby_out->section_size = (size_t)hdr.section_size;
+    baby_out->total_bins   = CUCKOO_K * (size_t)hdr.section_size;
+    baby_out->size         = (size_t)hdr.used_count;
+    baby_out->stash_count  = (int)hdr.stash_count;
+
+    if (!read_all(fd, baby_out->stash_xb, sizeof(baby_out->stash_xb)) ||
+        !read_all(fd, baby_out->stash_val, sizeof(baby_out->stash_val))) {
+        close(fd); return 0;
+    }
+
+    baby_out->tab = (entry_packed*)calloc(baby_out->total_bins, sizeof(entry_packed));
+    if (!baby_out->tab) { close(fd); return 0; }
+
+    if (!read_all(fd, baby_out->tab,
+                  baby_out->total_bins * sizeof(entry_packed))) {
+        free(baby_out->tab); baby_out->tab = NULL;
+        close(fd); return 0;
+    }
+
+    close(fd); return 1;
+}
+
+static int bsgs_ctx_load(bsgs_ctx* b, secp256k1_context* ctx,
+                                int bits_total, int l1) {
+    memset(b, 0, sizeof(*b));
+    b->ctx = ctx; b->bits_total = bits_total; b->l1 = l1;
+    if (bits_total <= 0 || bits_total > 64) return 0;
+    if (l1 <= 0 || l1 >= bits_total)        return 0;
+
+    b->M     = 1ULL << l1;
+    b->J     = 1ULL << (bits_total - l1);
+
+    unsigned char Msc[32];
+    u64_to_scalar32_be(b->M, Msc);
+    secp256k1_pubkey MG;
+    if (!secp256k1_ec_pubkey_create(ctx, &MG, Msc)) return 0;
+
+    pubkey_to_ge(&MG, &b->MG_ge);
+    ge_negate(&b->neg_MG_ge, &b->MG_ge);
+
+    char path[128];
+    baby_cache_path(path, sizeof(path), l1);
+    if (file_exists(path)) {
+        if (baby_load(path, l1, &b->baby)) {
+            printf("Loaded cuckoo table: %s "
+                   "(section=%zu, total=%zu, used=%zu, stash=%d)\n",
+                   path, b->baby.section_size, b->baby.total_bins,
+                   b->baby.size, b->baby.stash_count);
+            printf("Table memory: %.2f MB\n\n",
+                   (double)(b->baby.total_bins * sizeof(entry_packed)) / (1<<20));
+            return 1;
+        }
+        printf("Cache exists but failed to load (rebuilding): %s\n", path);
+    } else {
+        printf("Generate baby table first by running baby_table!\n");
+        return 0;
+    }
+
     return 1;
 }
 
+int map_get_all(const cuckoo_map* m, const unsigned char xb[32],
+                       uint32_t* out) {
+    size_t s = m->section_size;
+    int    n = 0;
+
+    const entry_packed* e;
+    e = &m->tab[cpos(0, xb, s)];
+    if (e->val && e->key == ckey(0, xb)) out[n++] = e->val;
+    e = &m->tab[cpos(1, xb, s)];
+    if (e->val && e->key == ckey(1, xb)) out[n++] = e->val;
+    e = &m->tab[cpos(2, xb, s)];
+    if (e->val && e->key == ckey(2, xb)) out[n++] = e->val;
+
+    for (int i = 0; i < m->stash_count; i++)
+        if (memcmp(m->stash_xb[i], xb, 32) == 0) out[n++] = m->stash_val[i];
+
+    return n;
+}
+
+/* ------- T2 (Giant table) helpers -------*/
+
 /* ─────────────────── T2 table: precompute and cache ─────────────── */
 /*
- * T2[j] = j * M * G  in affine coordinates, for j = 0..2^l2-1.
+ * T2[j] = j * M * G  in affine coordinates, for j = 0..2^(l2-1).
  *
  * Built once, saved to disk as fastecdlp_t2_secp256k1_l1_<l1>.bin.
  * Reused across all solves — this is FastECDLP's key precomputation.
  *
- * Memory: 2^l2 * sizeof(secp256k1_ge) bytes.
+ * Memory: 2^(l2-1) * sizeof(secp256k1_ge) bytes.
  */
 static void t2_cache_path(char* out, size_t outlen, int l1) {
     snprintf(out, outlen, "fastecdlp_t2_secp256k1_l1_%d.bin", l1);
 }
 
 static secp256k1_ge* build_t2(const secp256k1_context* ctx,
-                              uint64_t M, int l2,
-                              double* build_time_out) {
-    uint64_t J = 1ULL << l2;
+                              uint64_t M, int l2, double* build_time_out) {
+    uint64_t J = 1ULL << (l2-1);
     printf("Building T2: %"PRIu64" affine points...\n", J);
-
     /* Step 1: compute M*G */
     unsigned char sc_M[32]; u64_to_scalar32_be(M, sc_M);
     secp256k1_pubkey pk_MG;
@@ -208,8 +399,8 @@ static secp256k1_ge* build_t2(const secp256k1_context* ctx,
     double t0 = now_seconds();
     secp256k1_gej acc; secp256k1_gej_set_infinity(&acc);
     for (uint64_t j = 0; j < J; j++) {
-        secp256k1_gej_add_ge(&acc, &acc, &MG_ge);
         jac[j] = acc;
+        secp256k1_gej_add_ge(&acc, &acc, &MG_ge);
     }
 
     /* Step 3: batch normalize all J Jacobian points to affine */
@@ -249,7 +440,7 @@ static secp256k1_ge* get_t2(const secp256k1_context* ctx,
                             uint64_t M, int l1, int l2,
                             double* build_time_out) {
     char path[128]; t2_cache_path(path, sizeof(path), l1);
-    uint64_t J = 1ULL << l2;
+    uint64_t J = 1ULL << (l2-1);
     *build_time_out = 0.0;
 
     struct stat st;
@@ -260,7 +451,7 @@ static secp256k1_ge* get_t2(const secp256k1_context* ctx,
         double t0 = now_seconds();
         secp256k1_ge* T2 = load_t2(path, J);
         if (T2) {
-            printf("T2 loaded: %.2f sec\n", now_seconds() - t0);
+            printf("T2 loaded: %.2f sec\n\n", now_seconds() - t0);
             return T2;
         }
         printf("Load failed, rebuilding.\n");
@@ -277,6 +468,7 @@ static secp256k1_ge* get_t2(const secp256k1_context* ctx,
     return T2;
 }
 
+
 /* ─────────────────── per-thread solve ───────────────────────────── */
 /*
  * FastECDLP per-solve per-thread:
@@ -289,23 +481,24 @@ static secp256k1_ge* get_t2(const secp256k1_context* ctx,
  *   4. x(Pm - T2[j]) = lambda^2 - Pm.x - T2[j].x
  *   5. Look up in baby table
  */
+
+
 typedef struct {
-    const cuckoo_map*      baby;
-    const secp256k1_context* ctx;
+    const bsgs_ctx*  b;
     const secp256k1_ge*    T2;
     secp256k1_fe           Pm_x;   /* normalized */
     secp256k1_fe           Pm_y;   /* normalized */
-    uint64_t               M;
     uint64_t               j_start;
     uint64_t               j_end;
     const unsigned char*   target33;
     atomic_int*            found_flag;
-    uint64_t               result_m;
+    int64_t                result_m;
     int                    found;
 } thread_args;
 
 static void* thread_fn(void* varg) {
     thread_args* a = (thread_args*)varg;
+    const bsgs_ctx *b = a->b;
     uint64_t chunk = a->j_end - a->j_start;
 
     /* Allocate per-thread arrays */
@@ -320,18 +513,18 @@ static void* thread_fn(void* varg) {
     /* ── Phase 1: compute denominators denom[k] = Pm.x - T2[j].x ── */
     for (uint64_t k = 0; k < chunk; k++) {
         uint64_t j = a->j_start + k;
-        secp256k1_fe tx=a->T2[j-1].x;
+        secp256k1_fe tx=a->T2[j].x;
         secp256k1_fe_normalize_var(&tx);
         secp256k1_fe_negate(&denom[k],&tx,1);
         secp256k1_fe_add(&denom[k],&a->Pm_x);
         secp256k1_fe_normalize_var(&denom[k]);
         if(secp256k1_fe_is_zero(&denom[k])){
-            int64_t m1 = j*a->M;
-            int64_t m2 = -j*a->M;
-            if(verify_candidate(a->ctx,m1,a->target33)){
+            int64_t m1 = j*b->M;
+            int64_t m2 = -j*b->M;
+            if(verify_candidate(b->ctx,m1,a->target33)){
                 a->result_m=m1; a->found=1;
                 atomic_store(a->found_flag,1);
-            } else if(verify_candidate(a->ctx,m2,a->target33)){
+            } else if(verify_candidate(b->ctx,m2,a->target33)){
                 a->result_m=m2; a->found=1;
                 atomic_store(a->found_flag,1);
             }
@@ -342,25 +535,45 @@ static void* thread_fn(void* varg) {
     }
 
     /* ── Phase 2: Montgomery batch inversion over chunk denominators ── */
-    prefix[0] = denom[0];
-    for (uint64_t k = 1; k < chunk; k++)
-        secp256k1_fe_mul(&prefix[k], &prefix[k-1], &denom[k]);
+    if(chunk) {
+        prefix[0] = denom[0];
+        for (uint64_t k = 1; k < chunk; k++)
+            secp256k1_fe_mul(&prefix[k], &prefix[k-1], &denom[k]);
 
-    secp256k1_fe acc;
-    secp256k1_fe_inv(&acc, &prefix[chunk-1]);   /* single inversion */
+        secp256k1_fe acc;
+        secp256k1_fe_inv(&acc, &prefix[chunk-1]);   /* single inversion */
 
-    for (uint64_t k = chunk-1; k >= 1; k--) {
-        secp256k1_fe_mul(&inv_den[k], &prefix[k-1], &acc);
-        secp256k1_fe_mul(&acc, &acc, &denom[k]);
+        for (uint64_t k = chunk-1; k >= 1; k--) {
+            secp256k1_fe_mul(&inv_den[k], &prefix[k-1], &acc);
+            secp256k1_fe_mul(&acc, &acc, &denom[k]);
+        }
+        inv_den[0] = acc;
     }
-    inv_den[0] = acc;
     free(prefix); free(denom);
 
+    uint32_t cands[CUCKOO_K+CUCKOO_STASH_SZ];
+    int nc;
     /* ── Phase 3: compute x(Pm - T2[j]) and look up ── */
     for (uint64_t k = 0; k < chunk && !atomic_load(a->found_flag); k++) {
         uint64_t j = a->j_start + k;
 
-        secp256k1_fe tx = a->T2[j-1].x, ty = a->T2[j-1].y;
+        if (a->T2[j].infinity) {
+            unsigned char xb[32]; secp256k1_fe_get_b32(xb,&a->Pm_x);
+            nc=map_get_all(&b->baby,xb,cands);
+            for(int ci=0;ci<nc;ci++){
+                int64_t m1=(uint64_t)cands[ci];
+                int64_t m2=-(uint64_t)cands[ci];
+                if(verify_candidate(b->ctx,m1,a->target33)){
+                    a->result_m=m1;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
+                if(verify_candidate(b->ctx,m2,a->target33)){
+                    a->result_m=m2;a->found=1;
+                    atomic_store(a->found_flag,1);break;}
+            }
+            continue;
+        }
+
+        secp256k1_fe tx = a->T2[j].x, ty = a->T2[j].y;
         secp256k1_fe_normalize_var(&tx);
         secp256k1_fe_normalize_var(&ty);
 
@@ -373,32 +586,55 @@ static void* thread_fn(void* varg) {
         secp256k1_fe_mul(&lam, &num, &inv_den[k]);
 
         /* x3 = lambda^2 - Pm.x - T2[j].x */
-        secp256k1_fe lam2, x3;
+        secp256k1_fe lam2, x3, neg_sum_x1_x2;
         secp256k1_fe_sqr(&lam2, &lam);
         x3 = lam2;
-        secp256k1_fe neg_px = a->Pm_x;
-        secp256k1_fe_negate(&neg_px, &neg_px, 1);
-        secp256k1_fe_add(&x3, &neg_px);
-        secp256k1_fe neg_tx = tx;
-        secp256k1_fe_negate(&neg_tx, &neg_tx, 1);
-        secp256k1_fe_add(&x3, &neg_tx);
+
+        neg_sum_x1_x2 = a->Pm_x;
+        secp256k1_fe_add(&neg_sum_x1_x2, &tx);
+        secp256k1_fe_negate(&neg_sum_x1_x2, &neg_sum_x1_x2, 1);
+        secp256k1_fe_add(&x3, &neg_sum_x1_x2);
         secp256k1_fe_normalize_var(&x3);
 
         /* Lookup */
         unsigned char xb[32]; secp256k1_fe_get_b32(xb, &x3);
         uint32_t cands[CUCKOO_K + CUCKOO_STASH_SZ];
-        int nc = map_get_all(a->baby, xb, cands);
+        int nc = map_get_all(&b->baby, xb, cands);
         for (int ci = 0; ci < nc; ci++) {
-            uint64_t m1 = j * a->M + (uint64_t)cands[ci];
-            uint64_t m2 = j * a->M - (uint64_t)cands[ci];
-            if (verify_candidate(a->ctx, m1, a->target33)) {
+            uint64_t m1 = j * b->M + (uint64_t)cands[ci];
+            uint64_t m2 = j * b->M - (uint64_t)cands[ci];
+            if (verify_candidate(b->ctx, m1, a->target33)) {
                 a->result_m = m1; a->found = 1;
                 atomic_store(a->found_flag, 1); break;
             }
-            if (verify_candidate(a->ctx, m2, a->target33)) {
+            if (verify_candidate(b->ctx, m2, a->target33)) {
                 a->result_m = m2; a->found = 1;
                 atomic_store(a->found_flag, 1); break;
             }
+        }
+
+        if(atomic_load(a->found_flag)) break;
+        /* lambda = (Pm.y - T2[j].y) * inv_den[j] */
+        num = ty; secp256k1_fe_negate(&num,&num,1);
+        secp256k1_fe_add(&num, &a->Pm_y);
+        secp256k1_fe_mul(&lam, &num, &inv_den[k]);
+
+        secp256k1_fe_sqr(&lam2, &lam);
+        x3 = lam2;
+        secp256k1_fe_add(&x3, &neg_sum_x1_x2);
+        secp256k1_fe_normalize_var(&x3);
+
+        secp256k1_fe_get_b32(xb,&x3);
+        nc=map_get_all(&b->baby,xb,cands);
+        for(int ci=0;ci<nc;ci++){
+            int64_t m1=(int64_t)(-(int64_t)(j*b->M))+(uint64_t)cands[ci];
+            int64_t m2=(int64_t)(-(int64_t)(j*b->M))-(uint64_t)cands[ci];
+            if(verify_candidate(b->ctx,m1,a->target33)){
+                a->result_m=m1;a->found=1;
+                atomic_store(a->found_flag,1);break;}
+            if(verify_candidate(b->ctx,m2,a->target33)){
+                a->result_m=m2;a->found=1;
+                atomic_store(a->found_flag,1);break;}
         }
     }
 
@@ -406,52 +642,43 @@ static void* thread_fn(void* varg) {
     return NULL;
 }
 
+
 /* ─────────────────── parallel solve ─────────────────────────────── */
-static int fastecdlp_solve(const cuckoo_map* baby,
-                           const secp256k1_context* ctx,
+static int fastecdlp_solve_parallel(const bsgs_ctx *b,
                            const secp256k1_ge* T2,
-                           const secp256k1_ge* Pm_ge,
-                           uint64_t M, int l2, int threads,
-                           const unsigned char target33[33],
-                           uint64_t* out_m) {
-    uint64_t J     = 1ULL << l2;
+                           const secp256k1_pubkey* targetPm,
+                           int threads,
+                           int64_t* out_m) {
+    uint64_t J = b->J >> 1;
 
-    secp256k1_fe Pm_x = Pm_ge->x; secp256k1_fe_normalize_var(&Pm_x);
-    secp256k1_fe Pm_y = Pm_ge->y; secp256k1_fe_normalize_var(&Pm_y);
+    unsigned char target33[33];
+    if (!pubkey_serialize33(b->ctx, targetPm, target33)) return 0;
 
-    /* j=0: direct baby lookup for Pm = i.G */
-    unsigned char txb[32];
-    memcpy(txb, target33 + 1, 32); /* x-coordinate from compressed pubkey */
-    uint32_t cands[3 + CUCKOO_STASH_SZ];
-    int nc = map_get_all(baby, txb, cands);
-    for (int ci = 0; ci < nc; ci++) {
-        if (verify_candidate(ctx, (uint64_t)cands[ci], target33)) {
-            *out_m = (uint64_t)cands[ci]; return 1;
-        }
-    }
+    secp256k1_ge Pm_ge;
+    pubkey_to_ge(targetPm, &Pm_ge);
 
-    uint64_t chunk = (J + (uint64_t)threads - 1)/(uint64_t)threads;
+    uint64_t chunk = (J + (uint64_t)threads - 1) / (uint64_t)threads;
+
+    secp256k1_fe Pm_x = Pm_ge.x; secp256k1_fe_normalize_var(&Pm_x);
+    secp256k1_fe Pm_y = Pm_ge.y; secp256k1_fe_normalize_var(&Pm_y);
+
     pthread_t*   tids = (pthread_t*)  malloc((size_t)threads * sizeof(pthread_t));
     thread_args* args = (thread_args*)malloc((size_t)threads * sizeof(thread_args));
     atomic_int found_flag; atomic_init(&found_flag, 0);
 
-    uint64_t jcur = 1;
     for (int t = 0; t < threads; t++) {
-        args[t].baby       = baby;
-        args[t].ctx        = ctx;
+        args[t].b       = b;
         args[t].T2         = T2;
         args[t].Pm_x       = Pm_x;
         args[t].Pm_y       = Pm_y;
-        args[t].M          = M;
-        args[t].j_start    = jcur;
-        args[t].j_end      = jcur + chunk < J + 1 ?
-                             jcur + chunk : J + 1 ; /* j_end is not included */
+        args[t].j_start    = (uint64_t)t * chunk;
+        args[t].j_end      = (uint64_t)t * chunk + chunk < J
+                             ? (uint64_t)t * chunk + chunk : J;
         args[t].target33   = target33;
         args[t].found_flag = &found_flag;
         args[t].result_m   = 0;
         args[t].found      = 0;
         pthread_create(&tids[t], NULL, thread_fn, &args[t]);
-        jcur += chunk;
     }
 
     for (int t = 0; t < threads; t++) pthread_join(tids[t], NULL);
@@ -468,7 +695,7 @@ static int fastecdlp_solve(const cuckoo_map* baby,
 static void benchmark(int bits, int l1, int trials, int threads) {
     int l2 = bits - l1;
     uint64_t M = 1ULL << l1;
-    uint64_t J = 1ULL << l2;
+    uint64_t J = 1ULL << (l2-1);
     uint64_t chunk = (J + (uint64_t)threads - 1) / (uint64_t)threads;
     double mem_t2_gb  = (double)(J * sizeof(secp256k1_ge)) / (1ULL<<30);
     double mem_thr_gb = (double)(chunk * 2 * sizeof(secp256k1_fe)) / (1ULL<<30);
@@ -485,18 +712,26 @@ static void benchmark(int bits, int l1, int trials, int threads) {
     secp256k1_context* ctx =
             secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
 
-    /* Load baby table */
-    cuckoo_map baby; memset(&baby, 0, sizeof(baby));
-    if (!load_baby_table(&baby, l1)) {
+    bsgs_ctx solver;
+    if (!bsgs_ctx_load(&solver, ctx, bits, l1)) {
+        printf("Failed to load solver\n");
         secp256k1_context_destroy(ctx); return;
-    }
+    }   
+
+    /* Compute -2^(bits-1)*G. This is used for converting 
+       mG s.t. m in [0,2^l-1) into m'G s.t. m' in [-2^(l-1),2^(l-1)) */
+    uint64_t y = (1ULL<<(bits-1));
+    unsigned char ya[32]; u64_to_scalar32_be(y,ya);
+    secp256k1_pubkey neg_yG_pk;
+    secp256k1_ec_pubkey_create(ctx,&neg_yG_pk,ya);
+    secp256k1_ec_pubkey_negate(ctx,&neg_yG_pk);
 
     /* Get T2 (load from cache or build) */
     double t2_build_time;
     secp256k1_ge* T2 = get_t2(ctx, M, l1, l2, &t2_build_time);
     if (!T2) {
         fprintf(stderr, "Failed to get T2\n");
-        free(baby.tab); secp256k1_context_destroy(ctx); return;
+        bsgs_ctx_free(&solver); secp256k1_context_destroy(ctx); return;
     }
     if (t2_build_time > 0)
         printf("T2 build time: %.1f sec (one-time, cached for future runs)\n\n",
@@ -517,16 +752,22 @@ static void benchmark(int bits, int l1, int trials, int threads) {
         secp256k1_pubkey Pm_pk;
         secp256k1_ec_pubkey_create(ctx, &Pm_pk, sc);
         secp256k1_ge Pm_ge; pubkey_to_ge(&Pm_pk, &Pm_ge);
-        unsigned char t33[33]; size_t tlen = 33;
-        secp256k1_ec_pubkey_serialize(ctx, t33, &tlen, &Pm_pk, SECP256K1_EC_COMPRESSED);
+        
+           
+        secp256k1_pubkey Pm_pk_adj;  
+        /* Compute Pm' = Pm - 2^(bits-1)*G = Pm + (-yG) */
+        const secp256k1_pubkey *points[2] = { &Pm_pk, &neg_yG_pk };
+        secp256k1_ec_pubkey_combine(ctx, &Pm_pk_adj, points, 2);
+        secp256k1_ge Pm_ge_adj;
+        pubkey_to_ge(&Pm_pk_adj,&Pm_ge_adj);
 
-        uint64_t recovered = 0;
-        if (fastecdlp_solve(&baby, ctx, T2, &Pm_ge, M, l2, threads, t33, &recovered)
-            && recovered == m)
+        int64_t recovered = 0;
+        if (fastecdlp_solve_parallel(&solver,T2,&Pm_pk_adj,threads,&recovered)
+            && recovered + y == m)
             ok++;
         else
             printf("Trial %d FAILED: m=%"PRIu64" recovered=%"PRIu64"\n",
-                t, m, recovered);
+                t, m, recovered + y);
     }
 
     double te = now_seconds();
@@ -538,12 +779,12 @@ static void benchmark(int bits, int l1, int trials, int threads) {
     printf("Note: T2 build time (%.1f sec) is one-time and excluded above.\n",
            t2_build_time);
 
-    free(T2); free(baby.tab);
+    free(T2); bsgs_ctx_free(&solver);
     secp256k1_context_destroy(ctx);
 }
 
 int main(int argc, char** argv) {
-    int bits = 52, l1 = 28, trials = 5, threads = 10;
+    int bits = 52, l1 = 31, trials = 5, threads = 10;
     if (argc >= 2) bits    = atoi(argv[1]);
     if (argc >= 3) l1      = atoi(argv[2]);
     if (argc >= 4) trials  = atoi(argv[3]);
