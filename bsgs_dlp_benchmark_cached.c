@@ -38,7 +38,6 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-#define secp256k1_fe_equal_var(a,b) (secp256k1_fe_cmp_var((a),(b)) == 0)
 /* ---------------- timing ---------------- */
 
 static double now_seconds(void) {
@@ -523,7 +522,7 @@ typedef struct {
     cuckoo_map baby;   /* ← cuckoo hash table */
 } bsgs_ctx;
 
-static int bsgs_ctx_init_cached(bsgs_ctx* b, secp256k1_context* ctx,
+static int bsgs_ctx_init(bsgs_ctx* b, secp256k1_context* ctx,
                                 int bits_total, int l1) {
     memset(b, 0, sizeof(*b));
     b->ctx = ctx; b->bits_total = bits_total; b->l1 = l1;
@@ -687,7 +686,7 @@ static inline void process_window_single_thread( size_t w_count,
                                    const bsgs_ctx * restrict b,
                                    const unsigned char * restrict target33,
                                    int * restrict found,
-                                   uint64_t* restrict out_m,
+                                   uint64_t * restrict out_m,
                                    secp256k1_gej * restrict Q_win,
                                    uint64_t * restrict j_win,
                                    secp256k1_fe * restrict z,
@@ -942,8 +941,8 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     bsgs_worker_args* args = (bsgs_worker_args*)calloc((size_t)threads, sizeof(bsgs_worker_args));
     if (!tids || !args) { free(tids); free(args); return 0; }
 
-    atomic_int      found   = 0;
-    uint64_t        found_m = 0;
+    atomic_int     found   = 0;
+    uint64_t       found_m = 0;
     pthread_mutex_t found_mu;
     pthread_mutex_init(&found_mu, NULL);
 
@@ -982,7 +981,18 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
  * ================================================================ */
 
 static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
-                           int window, uint64_t fixed_m, const char* hex_pk) {
+                           int window, unsigned int seed) {
+    
+    if (bits_total == 0 || bits_total > 64) {
+        fprintf(stderr,"Error: invalid bits_total value: %i\n", bits_total);
+        return;
+    }
+
+    if (trials <= 0) {
+        fprintf(stderr, "Invalid trials: %d\n", trials);
+        return;
+    }
+
     printf("=== BSGS (secp256k1, cuckoo k=3, Jacobian, windowed TreeMon) ===\n");
     printf("Range  : m in [0, 2^%d)\n", bits_total);
     printf("Split  : l1=%d, l2=%d\n", l1, bits_total - l1);
@@ -995,7 +1005,7 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
 
     bsgs_ctx solver;
     double t0 = now_seconds();
-    if (!bsgs_ctx_init_cached(&solver, ctx, bits_total, l1)) {
+    if (!bsgs_ctx_init(&solver, ctx, bits_total, l1)) {
         printf("Failed to init solver\n");
         secp256k1_context_destroy(ctx); return;
     }
@@ -1003,90 +1013,51 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
     printf("Table : %.2f MB | Init: %.6f sec\n\n",
            (double)(solver.baby.total_bins * sizeof(entry_packed)) / (1 << 20), t1 - t0);
 
+    /* Run trials */
     uint64_t mask = (bits_total == 64) ? ~0ULL : ((1ULL << bits_total) - 1ULL);
-
-    /* If a hex public key is provided, solve that single point */
-    if (hex_pk) {
-        unsigned char pk_bytes[33];
-        size_t len = strlen(hex_pk);
-        if (len != 66) {
-            printf("Error: hex pubkey must be 66 hex chars (33 bytes compressed)\n");
-            goto done;
-        }
-        for (int i = 0; i < 33; i++) {
-            unsigned int byte;
-            if (sscanf(hex_pk + 2*i, "%02x", &byte) != 1) {
-                printf("Error: invalid hex in pubkey\n");
-                goto done;
-            }
-            pk_bytes[i] = (unsigned char)byte;
-        }
-        secp256k1_pubkey Pm;
-        if (!secp256k1_ec_pubkey_parse(ctx, &Pm, pk_bytes, 33)) {
-            printf("Error: failed to parse pubkey (not a valid secp256k1 point?)\n");
-            goto done;
-        }
-        printf("Input pubkey: %s\n", hex_pk);
-        double ts = now_seconds();
-        uint64_t recovered = 0;
-        int found = bsgs_solve_parallel(&solver, &Pm, threads, window, &recovered);
-        double te = now_seconds();
-        if (found)
-            printf("Solved: m = %"PRIu64" (0x%"PRIx64")\n", recovered, recovered);
-        else
-        printf("Not found in [0, 2^%d)\n", bits_total);
-        printf("Search time: %.6f sec (%.2f ms)\n", te - ts, (te - ts) * 1e3);
-        goto done;
-    }
-
-    /* If a fixed m is provided, use it for all trials */
+    uint64_t m_Max = mask;
     int ok = 0;
-    double ts = now_seconds();
+    double ts = 0;
+    double recovery_time = 0;
+
     for (int t = 0; t < trials; t++) {
         uint64_t m;
-        if (fixed_m > 0) {
-            m = fixed_m & mask;
-        } else {
+        
+        /* seed = 0: benchmark the worst case (m = 2^l - 1) */
+        if (seed){
             m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
             m &= mask; if (m == 0) m = 1;
+        }else{
+            m = m_Max;
         }
         unsigned char sc[32]; u64_to_scalar32_be(m, sc);
-        secp256k1_pubkey Pm;
-        if (!secp256k1_ec_pubkey_create(ctx, &Pm, sc)) { printf("create failed\n"); break; }
-
-        /* Print m*G as hex so user can verify externally */
-        if (fixed_m > 0) {
-            unsigned char ser[33]; size_t slen = 33;
-            secp256k1_ec_pubkey_serialize(ctx, ser, &slen, &Pm,
-                                          SECP256K1_EC_COMPRESSED);
-            printf("m    = %"PRIu64" (0x%"PRIx64")\n", m, m);
-            printf("m*G  = ");
-            for (int i = 0; i < 33; i++) printf("%02x", ser[i]);
-            printf("\n\n");
-        }
+        secp256k1_pubkey Pm_pk;
+        if (!secp256k1_ec_pubkey_create(ctx, &Pm_pk, sc)) { printf("create failed\n"); break; }
 
         uint64_t recovered = 0;
-        if (bsgs_solve_parallel(&solver, &Pm, threads, window, &recovered) && recovered == m)
+        
+        ts = now_seconds();
+        int found = bsgs_solve_parallel(&solver, &Pm_pk, threads, window, &recovered);
+        recovery_time += now_seconds() - ts;
+
+        if ( found && recovered == m)
             ok++;
         else
             printf("Trial %d FAILED: m=%"PRIu64" recovered=%"PRIu64"\n", t, m, recovered);
     }
-    double te = now_seconds();
-    double total = te - ts;
-    printf("Solved correctly: %d/%d\n", ok, trials);
-    printf("Total search time: %.6f sec\n", total);
-    printf("Average per solve: %.6f sec (%.2f ms)\n\n",
-           total / trials, (total / trials) * 1e3);
 
-    done:
+    printf("Random Seed      : %u\n", seed);
+    printf("Solved correctly : %d/%d\n", ok, trials);
+    printf("Total search time: %.3f sec\n", recovery_time);
+    printf("Average per solve: %.3f sec (%.2f ms)\n\n",
+           recovery_time/trials,(recovery_time/trials)*1e3);
     bsgs_ctx_free(&solver);
     secp256k1_context_destroy(ctx);
 }
 
 int main(int argc, char** argv) {
     int      bits_total = 40, l1 = 18, trials = 1, threads = 1, window = 64;
-    uint64_t fixed_m    = 0;
-    char*    hex_pk     = NULL;
+    unsigned int seed = (unsigned int)time(NULL);
 
     if (argc >= 2) bits_total = atoi(argv[1]);
     if (argc >= 3) l1         = atoi(argv[2]);
@@ -1094,19 +1065,15 @@ int main(int argc, char** argv) {
     if (argc >= 5) threads    = atoi(argv[4]);
     if (argc >= 6) window     = atoi(argv[5]);
     if (argc >= 7) {
-        /* argv[6]: either a decimal integer m or a 66-char hex pubkey */
-        if (strlen(argv[6]) == 66) {
-            hex_pk = argv[6];
-        } else {
-            fixed_m = (uint64_t)strtoull(argv[6], NULL, 10);
-        }
+        /* seed = 0: benchmark the worst case (m = 2^l - 1) */
+        seed = (unsigned int)strtoull(argv[6], NULL, 10);
     }
 
     /* Window must be a power of 2 >= 1 */
     if (window < 1) window = 1;
     { int w = 1; while (w < window) w <<= 1; window = w; }
 
-    srand((unsigned)time(NULL));
-    benchmark_bsgs(bits_total, l1, trials, threads, window, fixed_m, hex_pk);
+    srand(seed);
+    benchmark_bsgs(bits_total, l1, trials, threads, window, seed);
     return 0;
 }

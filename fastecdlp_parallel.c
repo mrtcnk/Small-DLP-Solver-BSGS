@@ -15,7 +15,7 @@
  *   + Jacobian (§3.1):      No T2, per-solve = J Jacobian additions + 1 full batch inv
  *   + Windowed  (§3.2):     No T2, per-solve = J Jacobian additions + J/W batch inv
  *
- * T2 memory: 2^l2 * sizeof(secp256k1_ge) bytes
+ * T2 memory: 2^(l2-1) * sizeof(secp256k1_ge) bytes
  *   l2=22 (52-bit): ~1.1 GB     l2=24 (54-bit): ~4.3 GB
  *
  * T2 cache file: fastecdlp_t2_secp256k1_l1_<l1>.bin
@@ -27,7 +27,7 @@
  *       -L/usr/local/lib                                              \
  *       -lsecp256k1 -lpthread
  *
- * Usage: ./fastecdlp_parallel <bits> <l1> <trials> <threads>
+ * Usage: ./fastecdlp_parallel <bits_total> <l1> <trials> <threads>
  */
 
 #include <stdio.h>
@@ -184,8 +184,13 @@ typedef struct {
     secp256k1_context* ctx;
     int bits_total, l1;
     uint64_t M, J;
+
     secp256k1_ge MG_ge;
     secp256k1_ge neg_MG_ge;
+
+    uint64_t offset;
+    secp256k1_pubkey neg_offsetG_pk;
+
     cuckoo_map baby;   /* ← cuckoo hash table */
 } bsgs_ctx;
 
@@ -250,15 +255,15 @@ static int baby_load(const char* path, int expected_l1, cuckoo_map* baby_out) {
     close(fd); return 1;
 }
 
-static int bsgs_ctx_load(bsgs_ctx* b, secp256k1_context* ctx,
+static int bsgs_ctx_init(bsgs_ctx* b, secp256k1_context* ctx,
                                 int bits_total, int l1) {
     memset(b, 0, sizeof(*b));
     b->ctx = ctx; b->bits_total = bits_total; b->l1 = l1;
-    if (bits_total <= 0 || bits_total > 64) return 0;
+    if (bits_total <= 0 || bits_total > 63) return 0;
     if (l1 <= 0 || l1 >= bits_total)        return 0;
 
     b->M     = 1ULL << l1;
-    b->J     = 1ULL << (bits_total - l1);
+    b->J     = 1ULL << (bits_total - l1 - 1);
 
     unsigned char Msc[32];
     u64_to_scalar32_be(b->M, Msc);
@@ -267,6 +272,12 @@ static int bsgs_ctx_load(bsgs_ctx* b, secp256k1_context* ctx,
 
     pubkey_to_ge(&MG, &b->MG_ge);
     ge_negate(&b->neg_MG_ge, &b->MG_ge);
+    
+    b->offset = 1ULL << (bits_total - 1);
+    unsigned char offset_c[32]; u64_to_scalar32_be(b->offset, offset_c);
+    if (!secp256k1_ec_pubkey_create(ctx, &b->neg_offsetG_pk, offset_c)) return 0;
+    secp256k1_ec_pubkey_negate(ctx, &b->neg_offsetG_pk);
+    
 
     char path[128];
     baby_cache_path(path, sizeof(path), l1);
@@ -289,29 +300,6 @@ static int bsgs_ctx_load(bsgs_ctx* b, secp256k1_context* ctx,
     return 1;
 }
 
-static int load_baby_table(cuckoo_map* baby, int l1) {
-    char fname[128];
-    snprintf(fname,sizeof(fname),"bsgs_baby_cuckoo_secp256k1_l1_%d_window.bin",l1);
-    int fd=open(fname,O_RDONLY); if(fd<0){perror(fname);return 0;}
-    baby_hdr hdr;
-    if(!read_all(fd,&hdr,sizeof(hdr))||hdr.magic!=BABY_MAGIC||
-       hdr.version!=4||(int)hdr.l1!=l1){fprintf(stderr,"Bad header %s\n",fname);close(fd);return 0;}
-    memset(baby,0,sizeof(*baby));
-    baby->section_size=(size_t)hdr.section_size;
-    baby->total_bins=CUCKOO_K*(size_t)hdr.section_size;
-    baby->size=(size_t)hdr.used_count; baby->stash_count=(int)hdr.stash_count;
-    if(!read_all(fd,baby->stash_xb,sizeof(baby->stash_xb))||
-       !read_all(fd,baby->stash_val,sizeof(baby->stash_val))){close(fd);return 0;}
-    baby->tab=(entry_packed*)calloc(baby->total_bins,sizeof(entry_packed));
-    if(!baby->tab||!read_all(fd,baby->tab,baby->total_bins*sizeof(entry_packed))){
-        free(baby->tab);close(fd);return 0;}
-    close(fd);
-    printf("Baby table: %s (section=%zu, total=%zu, stash=%d, %.2f MB)\n",
-           fname,baby->section_size,baby->total_bins,baby->stash_count,
-           (double)(baby->total_bins*sizeof(entry_packed))/(1<<20));
-    return 1;
-}
-
 static void map_free(cuckoo_map* m) {
     free(m->tab);
     memset(m, 0, sizeof(*m));
@@ -320,6 +308,7 @@ static void map_free(cuckoo_map* m) {
 static void bsgs_ctx_free(bsgs_ctx* b) {
     map_free(&b->baby); memset(b, 0, sizeof(*b));
 }
+
 /* ------- T2 (Giant table) helpers -------*/
 
 /* ─────────────────── T2 table: precompute and cache ─────────────── */
@@ -580,7 +569,7 @@ static int fastecdlp_solve_parallel(const bsgs_ctx *b,
                            const secp256k1_pubkey* targetPm,
                            int threads,
                            int64_t* out_m) {
-    uint64_t J = b->J >> 1;
+    uint64_t J = b->J;
 
     unsigned char target33[33];
     if (!pubkey_serialize33(b->ctx, targetPm, target33)) return 0;
@@ -611,7 +600,7 @@ static int fastecdlp_solve_parallel(const bsgs_ctx *b,
 
     uint64_t jcur = 1;
     for (int t = 0; t < threads; t++) {
-        args[t].b       = b;
+        args[t].b          = b;
         args[t].T2         = T2;
         args[t].Pm_x       = Pm_x;
         args[t].Pm_y       = Pm_y;
@@ -635,11 +624,35 @@ static int fastecdlp_solve_parallel(const bsgs_ctx *b,
     free(tids); free(args);
     return found;
 }
+/* ─────────────────────── Wrapper ─────────────────────────────── */
+/*
+ * Wrapper allowing the recovery of an unsigned message m in [0, 2^l) 
+ * using `fastecdlp_solve_parallel`, which operates in [-2^(l-1), 2^(l-1)). 
+ */
+static int fastecdlp_solve_parallel_wrapper(const bsgs_ctx* restrict b,
+                           const secp256k1_ge* restrict T2,
+                           const secp256k1_pubkey* restrict targetPm,
+                           int threads,
+                           uint64_t* out_m) {
+
+    /* Compute Pm' = Pm - 2^(bits_total-1).G = Pm + (-offset.G) */
+    secp256k1_pubkey Pm_adj_pk;  
+    const secp256k1_pubkey *points[2] = { targetPm, &b->neg_offsetG_pk };
+    secp256k1_ec_pubkey_combine(b->ctx, &Pm_adj_pk, points, 2);
+    
+    int found;
+    int64_t out_m_signed = 0;
+    found = fastecdlp_solve_parallel(b,T2,&Pm_adj_pk,threads,&out_m_signed);
+    *out_m = out_m_signed + b->offset;
+    return found;
+}
+
+
 
 /* ─────────────────────── benchmark ─────────────────────────────── */
-static void benchmark(int bits, int l1, int trials, int threads) {
-    if (bits == 0 || bits > 64) {
-        fprintf(stderr,"Error: invalid bits value: %i\n",bits);
+static void benchmark_bsgs(int bits_total, int l1, int trials, int threads, unsigned int seed) {
+    if (bits_total == 0 || bits_total > 64) {
+        fprintf(stderr,"Error: invalid bits_total value: %i\n",bits_total);
         return;
     }
 
@@ -648,106 +661,107 @@ static void benchmark(int bits, int l1, int trials, int threads) {
         return;
     }
 
-    int l2=bits-l1;
+    int l2=bits_total-l1;
     uint64_t J = 1ULL << (l2 - 1);
 
     uint64_t chunk = (J + (uint64_t)threads - 1) / (uint64_t)threads;
     double mem_t2_gb  = (double)(J * sizeof(secp256k1_ge)) / (1ULL<<30);
-    double mem_thr_gb = (double)(chunk * 2 * sizeof(secp256k1_fe)) / (1ULL<<30);
+    double mem_thr_gb = (double)(chunk * 3 * sizeof(secp256k1_fe)) / (1ULL<<30);
 
     printf("=== FastECDLP Parallel (Tang et al. + our parallel Ph.1+2) "
            "— secp256k1, k=3 cuckoo, T2 table ===\n");
-    printf("Range   : m in [0, 2^%d)\n", bits);
+    printf("Range   : m in [0, 2^%d)\n", bits_total);
     printf("Split   : l1=%d, l2=%d  (J=%"PRIu64")\n", l1, l2, J);
     printf("Threads : %d  (chunk=%"PRIu64" steps/thread)\n", threads, chunk);
     printf("T2 mem  : %.2f GB (precomputed, one-time)\n", mem_t2_gb);
-    printf("Per-thr : %.2f GB (denom + inv arrays)\n", mem_thr_gb);
+    printf("Per-thr : %.2f GB (denom + prefix + inv arrays)\n", mem_thr_gb);
     printf("Trials  : %d\n\n", trials);
 
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN|SECP256K1_CONTEXT_VERIFY);
+    secp256k1_context* ctx =
+            secp256k1_context_create(SECP256K1_CONTEXT_SIGN|SECP256K1_CONTEXT_VERIFY);
 
     if (ctx == NULL) {fprintf(stderr,"Error: could not create secp256k1 context\n");
         return;
     }
 
     bsgs_ctx solver;
-    if (!bsgs_ctx_load(&solver, ctx, bits, l1)) {
-        printf("Failed to load solver\n");
+    if (!bsgs_ctx_init(&solver, ctx, bits_total, l1)) {
+        printf("Failed to init solver\n");
         secp256k1_context_destroy(ctx); return;
     }   
 
-    /* Compute -2^(bits-1)*G. This is used for converting 
-       mG s.t. m in [0,2^l-1) into m'G s.t. m' in [-2^(l-1),2^(l-1)) */
-    uint64_t y = (1ULL<<(bits-1));
-    unsigned char ya[32]; u64_to_scalar32_be(y,ya);
-    secp256k1_pubkey neg_yG_pk;
-    secp256k1_ec_pubkey_create(ctx,&neg_yG_pk,ya);
-    secp256k1_ec_pubkey_negate(ctx,&neg_yG_pk);
 
     /* Get T2 (load from cache or build) */
-    double t2_build_time;
-    secp256k1_ge* T2 = get_t2(ctx, solver.M, l1, l2, &t2_build_time);
+    double t2_time;
+    secp256k1_ge* T2 = get_t2(ctx, solver.M, l1, l2, &t2_time);
     if (!T2) {
         fprintf(stderr, "Failed to get T2\n");
         bsgs_ctx_free(&solver); secp256k1_context_destroy(ctx); return;
     }
-    if (t2_build_time > 0)
+    if (t2_time > 0)
         printf("T2 build time: %.1f sec (one-time, cached for future runs)\n\n",
-               t2_build_time);
+               t2_time);
     else
         printf("\n");
 
     /* Run trials */
-    uint64_t mask = (bits == 64) ? ~0ULL : ((1ULL << bits) - 1ULL);
+    uint64_t mask = (bits_total == 64) ? ~0ULL : ((1ULL << bits_total) - 1ULL);
+    uint64_t m_Max = mask;
     int ok = 0;
-    double ts = now_seconds();
+    double ts = 0;
+    double recovery_time = 0;
 
     for (int t = 0; t < trials; t++) {
-        uint64_t m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
-        m &= mask; if (m == 0) m = 1;
-
+        uint64_t m;
+        
+        /* seed = 0: benchmark the worst case (m = 2^l - 1) */
+        if (seed){
+            m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
+            m &= mask; if (m == 0) m = 1;
+        }else{
+            m = m_Max;
+        }
         unsigned char sc[32]; u64_to_scalar32_be(m, sc);
         secp256k1_pubkey Pm_pk;
-        secp256k1_ec_pubkey_create(ctx, &Pm_pk, sc);
-        secp256k1_ge Pm_ge; pubkey_to_ge(&Pm_pk, &Pm_ge);
+        if (!secp256k1_ec_pubkey_create(ctx, &Pm_pk, sc)) { printf("create failed\n"); break; }
         
-        secp256k1_pubkey Pm_pk_adj;  
-        /* Compute Pm' = Pm - 2^(bits-1)*G = Pm + (-yG) */
-        const secp256k1_pubkey *points[2] = { &Pm_pk, &neg_yG_pk };
-        secp256k1_ec_pubkey_combine(ctx, &Pm_pk_adj, points, 2);
-        secp256k1_ge Pm_ge_adj;
-        pubkey_to_ge(&Pm_pk_adj,&Pm_ge_adj);
-
-        uint64_t recovered = 0;
-        int64_t recovered_signed = 0;
-        if (fastecdlp_solve_parallel(&solver,T2,&Pm_pk_adj,threads,&recovered_signed)
-            && (recovered = recovered_signed + y) == m)
+        ts = now_seconds();
+        uint64_t recovered=0;
+        int found = fastecdlp_solve_parallel_wrapper(&solver, T2, &Pm_pk, threads, &recovered);
+        recovery_time += now_seconds() - ts;
+        
+        if(found && (recovered == m))
             ok++;
         else
             printf("Trial %d FAILED: m=%"PRIu64" recovered=%"PRIu64"\n",
                 t, m, recovered);
     }
 
-    double te = now_seconds();
-    double total = te - ts;
+    printf("Random Seed      : %u\n", seed);
     printf("Solved correctly : %d/%d\n", ok, trials);
-    printf("Total time       : %.3f sec\n", total);
+    printf("Total search time: %.3f sec\n", recovery_time);
     printf("Average per solve: %.3f sec (%.2f ms)\n\n",
-           total / trials, (total / trials) * 1e3);
-    printf("Note: T2 build time (%.1f sec) is one-time and excluded above.\n",
-           t2_build_time);
+           recovery_time/trials,(recovery_time/trials)*1e3);
+    printf("Note: T2 build (%.1f sec) excluded above.\n",t2_time);
 
     free(T2); bsgs_ctx_free(&solver);
     secp256k1_context_destroy(ctx);
 }
 
 int main(int argc, char** argv) {
-    int bits = 40, l1 = 18, trials = 5, threads = 10;
-    if (argc >= 2) bits    = atoi(argv[1]);
-    if (argc >= 3) l1      = atoi(argv[2]);
-    if (argc >= 4) trials  = atoi(argv[3]);
-    if (argc >= 5) threads = atoi(argv[4]);
-    srand((unsigned)time(NULL));
-    benchmark(bits, l1, trials, threads);
+    int      bits_total = 40, l1 = 18, trials = 1, threads = 1;
+    unsigned int seed = (unsigned int)time(NULL);
+
+    if (argc >= 2) bits_total = atoi(argv[1]);
+    if (argc >= 3) l1         = atoi(argv[2]);
+    if (argc >= 4) trials     = atoi(argv[3]);
+    if (argc >= 5) threads    = atoi(argv[4]);
+    if (argc >= 6) {
+        /* seed = 0: benchmark the worst case (m = 2^l - 1) */
+        seed = (unsigned int)strtoull(argv[5], NULL, 10);
+    }
+
+    srand(seed);
+    benchmark_bsgs(bits_total, l1, trials, threads, seed);
     return 0;
 }
