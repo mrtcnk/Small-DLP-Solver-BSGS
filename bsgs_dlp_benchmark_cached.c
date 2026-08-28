@@ -107,25 +107,6 @@ static int read_all(int fd, void* buf, size_t len) {
 /* ================================================================
  * Jacobian helpers using secp256k1 internal types
  * ================================================================
- *
- * Core idea:
- *   secp256k1_gej_add_ge(&r, &a, &b)  -- Jacobian + affine, NO inversion
- *   secp256k1_ge_set_gej(&r, &a)      -- Jacobian -> affine, ONE inversion
- *                                         also normalises a in-place (z->1)
- *
- * Per-step inversion reduction:
- *   Previous:  pubkey_combine(Q)   -> 1 inv
- *              pubkey_combine(jMG) -> 1 inv
- *              serialize(Q)        -> 0 (already affine)
- *              serialize(jMG)      -> 0 (already affine)
- *              Total: 2 inv/step   (+ 1 inv/step above was wrong — total was 2)
- *
- *   This version:
- *              gej_add_ge(Qj)      -> 0 inv  (Jacobian add)
- *              gej_add_ge(jMGj)    -> 0 inv  (Jacobian add)
- *              ge_set_gej(Qj)      -> 1 inv  (x-coord for lookup, unavoidable)
- *              gej_eq_ge(jMGj)     -> 0 inv  (2 mults)
- *              Total: 1 inv/step   (~2x speedup on the loop)
  */
 
 /* Load secp256k1_pubkey into affine secp256k1_ge.
@@ -526,7 +507,7 @@ static int bsgs_ctx_init(bsgs_ctx* b, secp256k1_context* ctx,
                                 int bits_total, int l1) {
     memset(b, 0, sizeof(*b));
     b->ctx = ctx; b->bits_total = bits_total; b->l1 = l1;
-    if (bits_total <= 0 || bits_total > 63) return 0;
+    if (bits_total <= 0 || bits_total > 64) return 0;
     if (l1 <= 0 || l1 >= bits_total)        return 0;
 
     b->M     = 1ULL << l1;
@@ -716,8 +697,16 @@ static inline void process_window_single_thread( size_t w_count,
         uint32_t cands[3 + CUCKOO_STASH_SZ];
         int nc = map_get_all(&b->baby, qxb, cands);
         for (int ci = 0; ci < nc; ci++) {
-            uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
-            uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
+            /*
+             * m = (j*M) ± i, computed and stored entirely in uint64_t. Given that
+             * j*M <= 2^l, at l=64, j*M can reach/overflow 2^64 and wrap. j*M - i
+             * can wrap back to the correct m <= 2^l - 1, but j*M + i cannot -- it
+             * yields a wrong value, and more importantly falls out of the target
+             * m's valid range, so verify_candidate() rejects any wrapped,
+             * non-target m.
+            */
+            uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci]; // j*M + i
+            uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci]; // j*M - i
             if (EXPECT(verify_candidate(b->ctx, m1, target33), 0)) { *out_m = m1; *found = 1; return; }
             else if (EXPECT(verify_candidate(b->ctx, m2, target33), 0)) { *out_m = m2; *found = 1; return; }
         }
@@ -839,8 +828,16 @@ static inline void process_window(secp256k1_context *ctx, size_t w_count,
             uint32_t cands[3 + CUCKOO_STASH_SZ];
             int nc = map_get_all(&b->baby, qxb, cands);
         for (int ci = 0; ci < nc; ci++) {
-                uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci];
-                uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci];
+            /*
+             * m = (j*M) ± i, computed and stored entirely in uint64_t. Given that
+             * j*M <= 2^l, at l=64, j*M can reach/overflow 2^64 and wrap. j*M - i
+             * can wrap back to the correct m <= 2^l - 1, but j*M + i cannot -- it
+             * yields a wrong value, and more importantly falls out of the target
+             * m's valid range, so verify_candidate() rejects any wrapped,
+             * non-target m.
+            */
+            uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci]; // j*M + i
+            uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci]; // j*M - i
             uint64_t m_ok; int got = 0;
                 if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
                 else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
