@@ -8,6 +8,9 @@
 
 #include <secp256k1.h>
 
+#include "secp256k1_gej_zaddsub_ge_var.h"
+
+
 /*
  * secp256k1 internal headers for Jacobian arithmetic.
  *
@@ -15,7 +18,7 @@
  *   git clone https://github.com/bitcoin-core/secp256k1 secp256k1_src
  *
  * Build:
- *   cc -O3 -Wall -Wextra -o bsgs bsgs_dlp_benchmark_cached.c \
+ *   cc -O3 -Wall -Wextra -o bsgs_zaddsub bsgs_dlp_benchmark_zaddsub.c \
  *       -I/usr/local/include                                   \
  *       -I/path/to/secp256k1/src                               \
  *       -L/usr/local/lib                                       \
@@ -199,6 +202,20 @@ static void fe_batch_invert_skewed_tree(secp256k1_fe* out,
 
     /* Handle the first element */
     out[0] = acc;
+}
+
+/*
+ * fe_xb32_from_zinv_sq(): extract upper-64-bit affine x from
+ *   the x-coordinate of Jacobian point given its precomputed square of Z-inverse.
+ *   No inversion — 1 mul.
+ */
+static void fe_xb32_from_zinv_sq(const secp256k1_fe* x_jac,
+                               const secp256k1_fe*  z_inv_sq,
+                               unsigned char buf[32]) {
+    secp256k1_fe x;
+    secp256k1_fe_mul(&x, x_jac, z_inv_sq);
+    secp256k1_fe_normalize_var(&x);
+    secp256k1_fe_get_b32(buf, &x);
 }
 
 /* ================================================================
@@ -500,6 +517,9 @@ typedef struct {
     secp256k1_ge MG_ge;
     secp256k1_ge neg_MG_ge;
 
+    uint64_t offset;
+    secp256k1_pubkey neg_offsetG_pk;
+
     cuckoo_map baby;   /* ← cuckoo hash table */
 } bsgs_ctx;
 
@@ -512,7 +532,7 @@ static int bsgs_ctx_init(bsgs_ctx* b, secp256k1_context* ctx,
 
     b->M     = 1ULL << l1;
     b->Mhalf = 1ULL << (l1 - 1);
-    b->J     = 1ULL << (bits_total - l1);
+    b->J     = 1ULL << (bits_total - l1 - 1);
 
     unsigned char one[32] = {0}; one[31] = 1;
     if (!secp256k1_ec_pubkey_create(ctx, &b->G, one)) return 0;
@@ -523,6 +543,12 @@ static int bsgs_ctx_init(bsgs_ctx* b, secp256k1_context* ctx,
 
     pubkey_to_ge(&b->MG, &b->MG_ge);
     ge_negate(&b->neg_MG_ge, &b->MG_ge);
+    
+    b->offset = 1ULL << (bits_total - 1);
+    unsigned char offset_c[32]; u64_to_scalar32_be(b->offset, offset_c);
+    if (!secp256k1_ec_pubkey_create(ctx, &b->neg_offsetG_pk, offset_c)) return 0;
+    secp256k1_ec_pubkey_negate(ctx, &b->neg_offsetG_pk);
+    
 
     char path[128];
     baby_cache_path(path, sizeof(path), l1);
@@ -639,16 +665,29 @@ static void bsgs_ctx_free(bsgs_ctx* b) {
     map_free(&b->baby); memset(b, 0, sizeof(*b));
 }
 
-/* Verify candidate m: check m*G == target. Called at most once per solve. */
-static int verify_candidate(const secp256k1_context* ctx, uint64_t m,
+/* Adapted from the original verify_candidate function for signed m_cand */
+static int verify_candidate(const secp256k1_context* ctx,
+                            int64_t m_cand,
                             const unsigned char target33[33]) {
-    if (m == 0) return 0;
-    unsigned char sc[32]; u64_to_scalar32_be(m, sc);
-    secp256k1_pubkey chk;
-    if (!secp256k1_ec_pubkey_create(ctx, &chk, sc)) return 0;
-    unsigned char c33[33];
-    if (!pubkey_serialize33(ctx, &chk, c33)) return 0;
-    return memcmp(c33, target33, 33) == 0;
+    if(m_cand == 0) return 0;
+    if(m_cand < 0) {
+        // Handle negative candidate by computing -m_cand * G
+        unsigned char sc[32];
+        u64_to_scalar32_be((uint64_t)(-m_cand), sc);
+        secp256k1_pubkey pk;
+        if (!secp256k1_ec_pubkey_create(ctx, &pk, sc)) return 0;
+        secp256k1_ec_pubkey_negate(ctx, &pk); // Negate the public key
+        unsigned char got[33]; size_t glen = 33;
+        secp256k1_ec_pubkey_serialize(ctx, got, &glen, &pk, SECP256K1_EC_COMPRESSED);
+        return memcmp(got, target33, 33) == 0;
+    } else {
+        unsigned char sc[32]; u64_to_scalar32_be(m_cand, sc);
+        secp256k1_pubkey pk;
+        if (!secp256k1_ec_pubkey_create(ctx, &pk, sc)) return 0;
+        unsigned char got[33]; size_t glen = 33;
+        secp256k1_ec_pubkey_serialize(ctx, got, &glen, &pk, SECP256K1_EC_COMPRESSED);
+        return memcmp(got, target33, 33) == 0;
+    }
 }
 
 /* ================================================================
@@ -663,50 +702,69 @@ static int verify_candidate(const secp256k1_context* ctx, uint64_t m,
  *   Inversions per step: 1/W  (vs 1 before TreeMon)
  */
 static inline void process_window_single_thread( size_t w_count,
-                                   uint64_t j_start, secp256k1_gej * restrict Qj,
+                                   uint64_t j_start,
+                                   secp256k1_gej * restrict Qj_add, 
+                                   secp256k1_gej * restrict Qj_sub,
                                    const bsgs_ctx * restrict b,
                                    const unsigned char * restrict target33,
                                    int * restrict found,
-                                   uint64_t * restrict out_m,
-                                   secp256k1_gej * restrict Q_win,
+                                   int64_t * restrict out_m,
+                                   secp256k1_fe * restrict x_add,
+                                   secp256k1_fe * restrict x_sub,
                                    uint64_t * restrict j_win,
-                                   secp256k1_fe * restrict z,
+                                   secp256k1_fe * restrict z_c,
                                    secp256k1_fe * restrict z_inv,
                                    secp256k1_fe * restrict scratch)
 {
+
     for (size_t w = 0; w < w_count; w++) {
-        if (EXPECT(secp256k1_gej_is_infinity(Qj), 0)) {
+        if (EXPECT(secp256k1_gej_is_infinity(Qj_sub), 0)) {
             *out_m = (j_start + (uint64_t)w) * b->M;
             *found = 1;
             return;                                   /* skip invert/lookup entirely */
         }
-        Q_win[w] = *Qj;
+        if (EXPECT(secp256k1_gej_is_infinity(Qj_add), 0)) {
+            *out_m = -(int64_t)((j_start + (uint64_t)w) * b->M);
+            *found = 1;
+            return;                                   /* skip invert/lookup entirely */
+        }
+
+        x_sub[w] = Qj_sub->x; x_add[w] = Qj_add->x; z_c[w] = Qj_add->z;
         j_win[w] = j_start + (uint64_t)w;
-        secp256k1_gej_add_ge_var(Qj, Qj, &b->neg_MG_ge, NULL);
+            
+        secp256k1_gej_zaddsub_ge_var(Qj_add, Qj_sub, Qj_add, Qj_sub, &b->MG_ge);
     }
 
-    for (size_t w = 0; w < w_count; w++) {
-        z[w] = Q_win[w].z;
-        secp256k1_fe_normalize_var(&z[w]);
-    }
-    fe_batch_invert_skewed_tree(z_inv, z, scratch, w_count);
+    
+    fe_batch_invert_skewed_tree(z_inv, z_c, scratch, w_count);
 
     for (size_t w = 0; w < w_count; w++) {
+        secp256k1_fe z_inv_sq;
+        secp256k1_fe_sqr(&z_inv_sq, &z_inv[w]);
+
         unsigned char qxb[32];
-        gej_xb32_from_zinv(&Q_win[w], &z_inv[w], qxb);
+        fe_xb32_from_zinv_sq(&x_sub[w], &z_inv_sq, qxb);
         uint32_t cands[3 + CUCKOO_STASH_SZ];
         int nc = map_get_all(&b->baby, qxb, cands);
         for (int ci = 0; ci < nc; ci++) {
             /*
-             * m = (j*M) ± i, computed and stored entirely in uint64_t. Given that
-             * j*M <= 2^l, at l=64, j*M can reach/overflow 2^64 and wrap. j*M - i
-             * can wrap back to the correct m <= 2^l - 1, but j*M + i cannot -- it
-             * yields a wrong value, and more importantly falls out of the target
-             * m's valid range, so verify_candidate() rejects any wrapped,
-             * non-target m.
+             * m = ±(j*M) ± i, kept in uint64_t until one final cast to int64_t,
+             * avoiding UB from early signed casts/negation. j*M <= 2^(l-1); at
+             * l=64 this reaches 2^63, so subtractive forms always fit int64_t,
+             * but additive forms can overflow -- only when they're not the true
+             * candidate, so verify_candidate() safely rejects the aliased result.
             */
-            uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci]; // j*M + i
-            uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci]; // j*M - i
+            int64_t m1 = (int64_t)(j_win[w] * b->M + (uint64_t)cands[ci]); // +j*M + i
+            int64_t m2 = (int64_t)(j_win[w] * b->M - (uint64_t)cands[ci]); // +j*M - i
+            if (EXPECT(verify_candidate(b->ctx, m1, target33), 0)) { *out_m = m1; *found = 1; return; }
+            else if (EXPECT(verify_candidate(b->ctx, m2, target33), 0)) { *out_m = m2; *found = 1; return; }
+        }
+
+        fe_xb32_from_zinv_sq(&x_add[w], &z_inv_sq, qxb);
+        nc = map_get_all(&b->baby, qxb, cands);
+        for (int ci = 0; ci < nc; ci++) {
+            int64_t m1 = (int64_t)((uint64_t)cands[ci] - j_win[w] * b->M); // i - j*M = -j*M + i
+            int64_t m2 = (int64_t)(0ULL - (j_win[w] * b->M + (uint64_t)cands[ci])); // 0 - (j*M + i) = -j*M - i
             if (EXPECT(verify_candidate(b->ctx, m1, target33), 0)) { *out_m = m1; *found = 1; return; }
             else if (EXPECT(verify_candidate(b->ctx, m2, target33), 0)) { *out_m = m2; *found = 1; return; }
         }
@@ -716,8 +774,8 @@ static inline void process_window_single_thread( size_t w_count,
 static int bsgs_solve(const bsgs_ctx* b,
                       const secp256k1_pubkey* targetPm,
                       int window,
-                      uint64_t* out_m) {
-    
+                      int64_t* out_m) {
+
     unsigned char t33[33];
     if (!pubkey_serialize33(b->ctx, targetPm, t33)) return 0;
 
@@ -727,20 +785,23 @@ static int bsgs_solve(const bsgs_ctx* b,
     uint32_t cands[3 + CUCKOO_STASH_SZ];
     int nc = map_get_all(&b->baby, txb, cands);
     for (int ci = 0; ci < nc; ci++) {
-        if (verify_candidate(b->ctx, (uint64_t)cands[ci], t33)) {
-            *out_m = (uint64_t)cands[ci]; return 1;
+        if (verify_candidate(b->ctx, (int64_t)((uint64_t)cands[ci]), t33)) {
+            *out_m = (int64_t)(uint64_t)cands[ci]; return 1;
+        } else if (verify_candidate(b->ctx, -(int64_t)((uint64_t)cands[ci]), t33)) {
+            *out_m = -(int64_t)(uint64_t)cands[ci]; return 1;
         }
     }
 
     size_t W = (size_t)window;
-    secp256k1_gej* Q_win   = (secp256k1_gej*)malloc(W * sizeof(secp256k1_gej));
+    secp256k1_fe*  x_add   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
+    secp256k1_fe*  x_sub   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
+    secp256k1_fe*  z_c     = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     uint64_t*      j_win   = (uint64_t*)     malloc(W * sizeof(uint64_t));
-    secp256k1_fe*  z       = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     secp256k1_fe*  z_inv   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     secp256k1_fe*  scratch = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
 
-    if (!Q_win || !j_win || !z || !z_inv || !scratch) {
-        free(Q_win); free(j_win); free(z); free(z_inv); free(scratch);
+    if (!x_add || !x_sub || !z_c || !j_win || !z_inv || !scratch) {
+        free(x_add); free(x_sub); free(z_c); free(j_win); free(z_inv); free(scratch);
         return 0;
     }
 
@@ -749,25 +810,27 @@ static int bsgs_solve(const bsgs_ctx* b,
     uint64_t full_loops  = total_steps / (uint64_t)W;
     size_t   rem         = (size_t)(total_steps % (uint64_t)W);
 
-    secp256k1_gej Qj;
-    pubkey_to_gej(targetPm, &Qj);
-    secp256k1_gej_add_ge_var(&Qj, &Qj, &b->neg_MG_ge, NULL);
+    secp256k1_gej Qj_add, Qj_sub;
+    pubkey_to_gej(targetPm, &Qj_add);
+    Qj_sub = Qj_add;
+        
+    secp256k1_gej_zaddsub_ge_var(&Qj_add, &Qj_sub, &Qj_add, &Qj_sub, &b->MG_ge);
 
     int found = 0;
 
     /* ---- windowed main loop ---- */
     for (uint64_t l = 0; l < full_loops; l++) {
         if (found) break;
-        process_window_single_thread(W, j, &Qj, b, t33, &found, out_m, Q_win, j_win, z, z_inv, scratch);
+        process_window_single_thread(W, j, &Qj_add, &Qj_sub, b, t33, &found, out_m, x_add, x_sub, j_win, z_c, z_inv, scratch);
         j += (uint64_t)W;
     }
     /* ---- remaining steps (< W) ---- */
     if (rem > 0 && !found) {
-        process_window_single_thread(rem, j, &Qj, b, t33, &found, out_m, Q_win, j_win, z, z_inv, scratch);
+        process_window_single_thread(rem, j, &Qj_add, &Qj_sub, b, t33, &found, out_m, x_add, x_sub, j_win, z_c, z_inv, scratch);
         j += (uint64_t)rem;
     }
 
-    free(Q_win); free(j_win); free(z); free(z_inv); free(scratch);
+    free(x_add); free(x_sub); free(z_c); free(j_win); free(z_inv); free(scratch);
     return found;
 }
 
@@ -783,75 +846,108 @@ typedef struct {
     uint64_t         j_start, j_end;
     int              window;
     atomic_int*      found;
-    uint64_t*        found_m;
+    int64_t*        found_m;
     pthread_mutex_t* found_mu;
 } bsgs_worker_args;
 
 
 static inline void process_window(secp256k1_context *ctx, size_t w_count,
-                                   uint64_t j_start, secp256k1_gej * restrict Qj,
+                                   uint64_t j_start, 
+                                   secp256k1_gej * restrict Qj_add, 
+                                   secp256k1_gej * restrict Qj_sub,
                                    const bsgs_ctx * restrict b,
                                    bsgs_worker_args * restrict a,
-                                   secp256k1_gej * restrict Q_win,
+                                   secp256k1_fe * restrict x_add,
+                                   secp256k1_fe * restrict x_sub,
                                    uint64_t * restrict j_win,
-                                   secp256k1_fe * restrict z,
+                                   secp256k1_fe * restrict z_c,
                                    secp256k1_fe * restrict z_inv,
                                    secp256k1_fe * restrict scratch)
 {
-    for (size_t w = 0; w < w_count; w++) {
-        if (EXPECT(secp256k1_gej_is_infinity(Qj), 0)) {
-            uint64_t m = (j_start + (uint64_t)w) * b->M;
-                pthread_mutex_lock(a->found_mu);
-                if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
-                    *a->found_m = m;
-                    atomic_store_explicit(a->found, 1, memory_order_relaxed);
-                }
-                pthread_mutex_unlock(a->found_mu);
-            return;                                   /* skip invert/lookup entirely */
-            }
-        Q_win[w] = *Qj;
-        j_win[w] = j_start + (uint64_t)w;
-        secp256k1_gej_add_ge_var(Qj, Qj, &b->neg_MG_ge, NULL);
-        }
 
     for (size_t w = 0; w < w_count; w++) {
-        z[w] = Q_win[w].z;
-        secp256k1_fe_normalize_var(&z[w]);
+        if (EXPECT(secp256k1_gej_is_infinity(Qj_sub), 0)) {
+            int64_t m = (j_start + (uint64_t)w) * b->M;
+            pthread_mutex_lock(a->found_mu);
+            if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
+                *a->found_m = m;
+                atomic_store_explicit(a->found, 1, memory_order_relaxed);
+            }
+            pthread_mutex_unlock(a->found_mu);
+            return;                                   /* skip invert/lookup entirely */
         }
-    fe_batch_invert_skewed_tree(z_inv, z, scratch, w_count);
+        if (EXPECT(secp256k1_gej_is_infinity(Qj_add), 0)) {
+            int64_t m = -(int64_t)((j_start + (uint64_t)w) * b->M);
+            pthread_mutex_lock(a->found_mu);
+            if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
+                *a->found_m = m;
+                atomic_store_explicit(a->found, 1, memory_order_relaxed);
+            }
+            pthread_mutex_unlock(a->found_mu);
+            return;                                   /* skip invert/lookup entirely */
+        }
+
+        x_sub[w] = Qj_sub->x; x_add[w] = Qj_add->x; z_c[w] = Qj_add->z;
+        j_win[w] = j_start + (uint64_t)w;
+            
+        secp256k1_gej_zaddsub_ge_var(Qj_add, Qj_sub, Qj_add, Qj_sub, &b->MG_ge);
+    }
+
+    fe_batch_invert_skewed_tree(z_inv, z_c, scratch, w_count);
 
     for (size_t w = 0; w < w_count; w++) {
         if (EXPECT(atomic_load_explicit(a->found, memory_order_relaxed), 0)) return;
 
-            unsigned char qxb[32];
-        gej_xb32_from_zinv(&Q_win[w], &z_inv[w], qxb);
-            uint32_t cands[3 + CUCKOO_STASH_SZ];
-            int nc = map_get_all(&b->baby, qxb, cands);
+        secp256k1_fe z_inv_sq;
+        secp256k1_fe_sqr(&z_inv_sq, &z_inv[w]);
+        
+        unsigned char qxb[32];
+        fe_xb32_from_zinv_sq(&x_sub[w], &z_inv_sq, qxb);
+        uint32_t cands[3 + CUCKOO_STASH_SZ];
+        int nc = map_get_all(&b->baby, qxb, cands);
         for (int ci = 0; ci < nc; ci++) {
             /*
-             * m = (j*M) ± i, computed and stored entirely in uint64_t. Given that
-             * j*M <= 2^l, at l=64, j*M can reach/overflow 2^64 and wrap. j*M - i
-             * can wrap back to the correct m <= 2^l - 1, but j*M + i cannot -- it
-             * yields a wrong value, and more importantly falls out of the target
-             * m's valid range, so verify_candidate() rejects any wrapped,
-             * non-target m.
+             * m = ±(j*M) ± i, kept in uint64_t until one final cast to int64_t,
+             * avoiding UB from early signed casts/negation. j*M <= 2^(l-1); at
+             * l=64 this reaches 2^63, so subtractive forms always fit int64_t,
+             * but additive forms can overflow -- only when they're not the true
+             * candidate, so verify_candidate() safely rejects the aliased result.
             */
-            uint64_t m1 = j_win[w] * b->M + (uint64_t)cands[ci]; // j*M + i
-            uint64_t m2 = j_win[w] * b->M - (uint64_t)cands[ci]; // j*M - i
-            uint64_t m_ok; int got = 0;
-                if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
-                else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
+            int64_t m1 = (int64_t)(j_win[w] * b->M + (uint64_t)cands[ci]); // +j*M + i
+            int64_t m2 = (int64_t)(j_win[w] * b->M - (uint64_t)cands[ci]); // +j*M - i
+            int64_t m_ok; int got = 0;
+            if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
+            else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
             if (EXPECT(got, 0)) {
-                    pthread_mutex_lock(a->found_mu);
-                    if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
-                        *a->found_m = m_ok;
-                        atomic_store_explicit(a->found, 1, memory_order_relaxed);
-                    }
-                    pthread_mutex_unlock(a->found_mu);
-                return;
+                pthread_mutex_lock(a->found_mu);
+                if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
+                    *a->found_m = m_ok;
+                    atomic_store_explicit(a->found, 1, memory_order_relaxed);
                 }
+                pthread_mutex_unlock(a->found_mu);
+                return;
             }
         }
+
+        fe_xb32_from_zinv_sq(&x_add[w], &z_inv_sq, qxb);
+        nc = map_get_all(&b->baby, qxb, cands);
+        for (int ci = 0; ci < nc; ci++) {
+            int64_t m1 = (int64_t)((uint64_t)cands[ci] - j_win[w] * b->M); // i - j*M = -j*M + i
+            int64_t m2 = (int64_t)(0ULL - (j_win[w] * b->M + (uint64_t)cands[ci])); // 0 - (j*M + i) = -j*M - i
+            int64_t m_ok; int got = 0;
+            if (verify_candidate(ctx, m1, a->target33)) { m_ok = m1; got = 1; }
+            else if (verify_candidate(ctx, m2, a->target33)) { m_ok = m2; got = 1; }
+            if (EXPECT(got, 0)) {
+                pthread_mutex_lock(a->found_mu);
+                if (!atomic_load_explicit(a->found, memory_order_relaxed)) {
+                    *a->found_m = m_ok;
+                    atomic_store_explicit(a->found, 1, memory_order_relaxed);
+                }
+                pthread_mutex_unlock(a->found_mu);
+                return;
+            }
+        }
+    }
 }
 
 static void* bsgs_worker_thread(void* argp) {
@@ -862,14 +958,16 @@ static void* bsgs_worker_thread(void* argp) {
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
     if (!ctx) return NULL;
 
-    secp256k1_gej* Q_win   = (secp256k1_gej*)malloc(W * sizeof(secp256k1_gej));
+
+    secp256k1_fe*  x_add   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
+    secp256k1_fe*  x_sub   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
+    secp256k1_fe*  z_c     = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     uint64_t*      j_win   = (uint64_t*)     malloc(W * sizeof(uint64_t));
-    secp256k1_fe*  z       = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     secp256k1_fe*  z_inv   = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
     secp256k1_fe*  scratch = (secp256k1_fe*) malloc(W * sizeof(secp256k1_fe));
 
-    if (!Q_win || !j_win || !z || !z_inv || !scratch) {
-        free(Q_win); free(j_win); free(z); free(z_inv); free(scratch);
+    if (!x_add || !x_sub || !z_c || !j_win || !z_inv || !scratch) {
+        free(x_add); free(x_sub); free(z_c); free(j_win); free(z_inv); free(scratch);
         secp256k1_context_destroy(ctx); return NULL;
     }
 
@@ -882,39 +980,40 @@ static void* bsgs_worker_thread(void* argp) {
     u64_to_scalar32_be(j * b->M, jm_sc);
     secp256k1_pubkey jMG_pub;
     if (!secp256k1_ec_pubkey_create(ctx, &jMG_pub, jm_sc)) {
-        free(Q_win); free(j_win); free(z); free(z_inv); free(scratch);
+        free(x_add); free(x_sub); free(z_c); free(j_win); free(z_inv); free(scratch);
         secp256k1_context_destroy(ctx); return NULL;
     }
 
-    secp256k1_ge jMG_ge, neg_jMG_ge;
+    secp256k1_ge jMG_ge;
     pubkey_to_ge(&jMG_pub, &jMG_ge);
-    ge_negate(&neg_jMG_ge, &jMG_ge);
 
-    secp256k1_gej Qj;
-    pubkey_to_gej(&a->targetPm, &Qj);
-    secp256k1_gej_add_ge_var(&Qj, &Qj, &neg_jMG_ge, NULL);
+    secp256k1_gej Qj_add, Qj_sub;
+    pubkey_to_gej(&a->targetPm, &Qj_add);
+    Qj_sub = Qj_add;
+        
+    secp256k1_gej_zaddsub_ge_var(&Qj_add, &Qj_sub, &Qj_add, &Qj_sub, &jMG_ge);
 
     /* ---- windowed main loop ---- */
     for (uint64_t l = 0; l < full_loops; l++) {
         if (atomic_load_explicit(a->found, memory_order_relaxed)) break;
-        process_window(ctx, W, j, &Qj, b, a, Q_win, j_win, z, z_inv, scratch);
+        process_window(ctx, W, j, &Qj_add, &Qj_sub, b, a, x_add, x_sub, j_win, z_c, z_inv, scratch);
         j += (uint64_t)W;
     }
     /* ---- remaining steps (< W) ---- */
     if (rem > 0 && !atomic_load_explicit(a->found, memory_order_relaxed)) {
-        process_window(ctx, rem, j, &Qj, b, a, Q_win, j_win, z, z_inv, scratch);
+        process_window(ctx, rem, j, &Qj_add, &Qj_sub, b, a, x_add, x_sub, j_win, z_c, z_inv, scratch);
         j += (uint64_t)rem;
     }
 
-    free(Q_win); free(j_win); free(z); free(z_inv); free(scratch);
+    free(x_add); free(x_sub); free(z_c); free(j_win); free(z_inv); free(scratch);
     secp256k1_context_destroy(ctx);
     return NULL;
 }
 
-static int bsgs_solve_parallel(const bsgs_ctx* b,
+static int bsgs_solve_zaddsub_parallel(const bsgs_ctx* b,
                                const secp256k1_pubkey* targetPm,
                                int threads, int window,
-                               uint64_t* out_m) {
+                               int64_t* out_m) {
     if (threads < 1) threads = 1;
     if (threads == 1) return bsgs_solve(b, targetPm, window, out_m);
 
@@ -927,11 +1026,13 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     uint32_t cands[3 + CUCKOO_STASH_SZ];
     int nc = map_get_all(&b->baby, txb, cands);
     for (int ci = 0; ci < nc; ci++) {
-        if (verify_candidate(b->ctx, (uint64_t)cands[ci], t33)) {
-            *out_m = (uint64_t)cands[ci]; return 1;
+        if (verify_candidate(b->ctx, (int64_t)((uint64_t)cands[ci]), t33)) {
+            *out_m = (int64_t)(uint64_t)cands[ci]; return 1;
+        } else if (verify_candidate(b->ctx, -(int64_t)((uint64_t)cands[ci]), t33)) {
+            *out_m = -(int64_t)(uint64_t)cands[ci]; return 1;
         }
     }
-    
+
     uint64_t J = b->J;
     uint64_t chunk = (J + (uint64_t)threads - 1)/(uint64_t)threads;
     pthread_t*        tids = (pthread_t*)       calloc((size_t)threads, sizeof(pthread_t));
@@ -939,13 +1040,13 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     if (!tids || !args) { free(tids); free(args); return 0; }
 
     atomic_int     found   = 0;
-    uint64_t       found_m = 0;
+    int64_t        found_m = 0;
     pthread_mutex_t found_mu;
     pthread_mutex_init(&found_mu, NULL);
 
     secp256k1_ge target_ge;
     pubkey_to_ge(targetPm, &target_ge);
-    
+
     uint64_t jcur = 1;
     for (int t = 0; t < threads; t++) {
         args[t].b         = b;
@@ -972,6 +1073,31 @@ static int bsgs_solve_parallel(const bsgs_ctx* b,
     free(tids); free(args);
     return ok;
 }
+
+/* ─────────────────────── Wrapper ─────────────────────────────── */
+/*
+ * Wrapper allowing the recovery of an unsigned message m in [0, 2^l) 
+ * using `bsgs_solve_zaddsub_parallel`, which operates in [-2^(l-1), 2^(l-1)). 
+ */
+static int bsgs_solve_zaddsub_parallel_wrapper(const bsgs_ctx* restrict b,
+                           const secp256k1_pubkey* restrict targetPm,
+                           int threads, int window,
+                           uint64_t* out_m) {
+
+    /* Compute Pm' = Pm - 2^(bits_total-1).G = Pm + (-offset.G) */
+    secp256k1_pubkey Pm_adj_pk;  
+    const secp256k1_pubkey *points[2] = { targetPm, &b->neg_offsetG_pk };
+    secp256k1_ec_pubkey_combine(b->ctx, &Pm_adj_pk, points, 2);
+    
+    int found;
+    int64_t out_m_signed = 0;
+    found = bsgs_solve_zaddsub_parallel(b,&Pm_adj_pk,threads,window,&out_m_signed);
+    *out_m = out_m_signed + b->offset;
+    return found;
+}
+
+
+
 
 /* ================================================================
  * Benchmark
@@ -1016,10 +1142,10 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
     int ok = 0;
     double ts = 0;
     double recovery_time = 0;
-
+    
     for (int t = 0; t < trials; t++) {
         uint64_t m;
-        
+
         /* seed = 0: benchmark the worst case (m = 2^l - 1) */
         if (seed){
             m = ((uint64_t)rand() << 32) ^ (uint64_t)rand();
@@ -1032,15 +1158,15 @@ static void benchmark_bsgs(int bits_total, int l1, int trials, int threads,
         if (!secp256k1_ec_pubkey_create(ctx, &Pm_pk, sc)) { printf("create failed\n"); break; }
 
         uint64_t recovered = 0;
-        
-        ts = now_seconds();
-        int found = bsgs_solve_parallel(&solver, &Pm_pk, threads, window, &recovered);
-        recovery_time += now_seconds() - ts;
 
+        ts = now_seconds();
+        int found = bsgs_solve_zaddsub_parallel_wrapper(&solver, &Pm_pk, threads, window, &recovered);
+        recovery_time += now_seconds() - ts;
+        
         if ( found && recovered == m)
             ok++;
         else
-            printf("Trial %d FAILED: m=%"PRIu64" recovered=%"PRIu64"\n", t, m, recovered);
+            printf("Trial %d FAILED: m=%"PRIu64" recovered=%"PRIu64"\n", t, m, recovered);        
     }
 
     printf("Random Seed      : %u\n", seed);
