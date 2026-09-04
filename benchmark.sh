@@ -107,6 +107,25 @@ run_benchmark() {
     fi
 }
 
+run_benchmark_worst_case() {
+    local label=$1
+    local binary=$2
+    local bits=$3
+    local extra=${5:-""}
+
+    log ""
+    log "--- $label (worst case: m = 2^$bits - 1) ---"
+    if [[ -n "$extra" ]]; then
+        ./"$binary" "$bits" "$L1" 1 "$THREADS" "$WINDOW" 0 2>&1 | \
+            grep -E "Average per solve|Solved correctly" | \
+            sed 's/^/    /' | tee -a "$LOG_FILE"
+    else
+        ./"$binary" "$bits" "$L1" 1 "$THREADS" 0 2>&1 | \
+            grep -E "Average per solve|Solved correctly|Total time" | \
+            sed 's/^/    /' | tee -a "$LOG_FILE"
+    fi
+}
+
 # 54-bit
 separator
 log "54-bit benchmarks (l1=$L1, W=$WINDOW, threads=$THREADS, trials=$TRIALS_SMALL)"
@@ -115,6 +134,15 @@ run_benchmark "FastECDLP TreeMon (Tang et al.)"  fastecdlp_treemon  54 $TRIALS_S
 run_benchmark "FastECDLP Parallel (our Ph.1+2)"  fastecdlp_parallel 54 $TRIALS_SMALL ""
 run_benchmark "BSGS (windowed batch inversion)"  bsgs               54 $TRIALS_SMALL "window"
 run_benchmark "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub       54 $TRIALS_SMALL "window"
+
+separator
+log ""
+log "54-bit worst-case benchmarks (l1=$L1, W=$WINDOW, threads=$THREADS, m=2^54-1)"
+separator
+run_benchmark_worst_case "FastECDLP TreeMon (Tang et al.)"  fastecdlp_treemon  54 1 ""
+run_benchmark_worst_case "FastECDLP Parallel (our Ph.1+2)"  fastecdlp_parallel 54 1 ""
+run_benchmark_worst_case "BSGS (windowed batch inversion)"  bsgs               54 1 "window"
+run_benchmark_worst_case "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub       54 1 "window"
 
 # 58-bit
 separator
@@ -126,6 +154,15 @@ run_benchmark "FastECDLP Parallel (our Ph.1+2)"  fastecdlp_parallel 58 $TRIALS_L
 run_benchmark "BSGS (windowed batch inversion)"  bsgs               58 $TRIALS_LARGE "window"
 run_benchmark "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub       58 $TRIALS_LARGE "window"
 
+separator
+log ""
+log "58-bit worst-case benchmarks (l1=$L1, W=$WINDOW, threads=$THREADS, m=2^58-1)"
+separator
+run_benchmark_worst_case "FastECDLP TreeMon (Tang et al.)"  fastecdlp_treemon  58 1 ""
+run_benchmark_worst_case "FastECDLP Parallel (our Ph.1+2)"  fastecdlp_parallel 58 1 ""
+run_benchmark_worst_case "BSGS (windowed batch inversion)"  bsgs               58 1 "window"
+run_benchmark_worst_case "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub       58 1 "window"
+
 # 63-bit
 separator
 log ""
@@ -135,6 +172,13 @@ separator
 run_benchmark "BSGS (windowed batch inversion)"  bsgs         63 $TRIALS_LARGE "window"
 run_benchmark "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub 63 $TRIALS_LARGE "window"
 
+separator
+log ""
+log "63-bit worst-case benchmarks (l1=$L1, W=$WINDOW, threads=$THREADS, m=2^63-1)"
+separator
+run_benchmark_worst_case "BSGS (windowed batch inversion)"  bsgs         63 1 "window"
+run_benchmark_worst_case "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub 63 1 "window"
+
 # 64-bit
 separator
 log ""
@@ -143,6 +187,13 @@ log "Note: FastECDLP variants infeasible (T2 = 175 GB)"
 separator
 run_benchmark "BSGS (windowed batch inversion)"  bsgs         64 $TRIALS_LARGE "window"
 run_benchmark "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub 64 $TRIALS_LARGE "window"
+
+separator
+log ""
+log "64-bit worst-case benchmarks (l1=$L1, W=$WINDOW, threads=$THREADS, m=2^64-1)"
+separator
+run_benchmark_worst_case "BSGS (windowed batch inversion)"  bsgs         64 1 "window"
+run_benchmark_worst_case "BSGS zaddsub (Co-Z arithmetic)"   bsgs_zaddsub 64 1 "window"
 
 # --- Summary ---
 separator
